@@ -6,7 +6,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-# Kaynak (Aksu Belediyesi)
+# Kaynak
 AKSU_URL = os.getenv("AKSU_URL", "https://www.aksu.bel.tr/ihaleler")
 
 # Telegram
@@ -18,6 +18,8 @@ STATE_PATH = "state.json"
 
 
 def send_telegram(text: str) -> None:
+    if not BOT_TOKEN or not CHAT_ID:
+        raise RuntimeError("BOT_TOKEN veya CHAT_ID eksik.")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     r = requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=30)
     r.raise_for_status()
@@ -63,7 +65,7 @@ def aksu_fetch_items(limit: int = 80) -> list[dict]:
         if len(title) < 8:
             continue
 
-        # Başlıkta "ihale" geçenleri öncelikle al
+        # Başlıkta "ihale" geçenleri al
         if "ihale" not in title.lower():
             continue
 
@@ -86,7 +88,6 @@ def aksu_check_new(state: dict) -> tuple[list[dict], dict]:
     seen_urls = set(state.get("aksu_seen_urls", []))
 
     items = aksu_fetch_items(limit=80)
-
     new_items = [it for it in items if it["url"] not in seen_urls]
 
     # state güncelle (en fazla 500 link sakla)
@@ -98,18 +99,17 @@ def aksu_check_new(state: dict) -> tuple[list[dict], dict]:
 
 
 def main() -> None:
-    if not BOT_TOKEN or not CHAT_ID:
-        raise SystemExit("BOT_TOKEN veya CHAT_ID eksik. GitHub Secrets ayarlarını kontrol edin.")
+    # 1) HEARTBEAT (her çalıştırmada 1 mesaj)
+    send_telegram("HEARTBEAT: Bot çalıştı ve tetiklendi.")
 
+    # 2) Normal iş: yeni ihaleleri kontrol et
     state = load_state()
-
     new_items, state = aksu_check_new(state)
 
-    # Yeni ihaleleri tek tek gönder
     if new_items:
         for it in new_items:
             send_telegram(f"🆕 Aksu Belediyesi ihale:\n{it['title']}\n{it['url']}")
-            time.sleep(1)  # Telegram rate limit için ufak bekleme
+            time.sleep(1)
 
     save_state(state)
 
