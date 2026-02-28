@@ -73,8 +73,9 @@ def main():
     current_hash = sha(snapshot)
 
     if not last_hash:
-        save_state({"last_hash": current_hash})
-        return
+    save_state({"last_hash": current_hash})
+    send_telegram("Test mesajı: Bot aktif çalışıyor.")
+    return
 
     if current_hash != last_hash:
         msg = (
