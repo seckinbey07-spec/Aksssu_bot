@@ -1,18 +1,28 @@
 import os
 import json
-import hashlib
+import time
+import re
+from urllib.parse import urljoin
+
 import requests
 from bs4 import BeautifulSoup
 
-CHECK_URL = os.getenv("CHECK_URL", "https://www.aksu.bel.tr/ihaleler")
+# EKAP bulletin PDF parsing
+from pypdf import PdfReader
+
+
+AKSU_URL = os.getenv("AKSU_URL", "https://www.aksu.bel.tr/ihaleler")
+EKAP_BULTEN_URL = os.getenv("EKAP_BULTEN_URL", "https://ekap.kik.gov.tr/ekap/ilan/bultenindirme.aspx")
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+
 STATE_PATH = "state.json"
 
 
 def send_telegram(text: str) -> None:
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    r = requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=20)
+    r = requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=30)
     r.raise_for_status()
 
 
@@ -28,44 +38,146 @@ def save_state(state: dict) -> None:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def sha(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def http_get(url: str) -> requests.Response:
+    return requests.get(
+        url,
+        timeout=45,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
 
 
-def fetch_top_items() -> list[tuple[str, str]]:
-    r = requests.get(CHECK_URL, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+# ----------------------------
+# 1) AKSU Belediyesi: yeni ihale linklerini yakala
+# ----------------------------
+def aksu_fetch_items(limit: int = 50) -> list[dict]:
+    """
+    Returns list of {"title": str, "url": str}
+    """
+    r = http_get(AKSU_URL)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
 
-    items: list[tuple[str, str]] = []
+    items = []
     seen = set()
 
-    # Öncelik: içinde "ihale" geçen link başlıkları
+    # Sayfada "ihale" içeren başlık/linkler
     for a in soup.select("a"):
         title = " ".join(a.get_text(" ", strip=True).split())
-        href = a.get("href") or ""
-        if not title or len(title) < 10:
+        href = (a.get("href") or "").strip()
+        if not title or len(title) < 8 or not href:
+            continue
+        if "ihale" not in title.lower():
             continue
 
-        key = (title, href)
+        full_url = urljoin(AKSU_URL, href)
+        key = (title, full_url)
         if key in seen:
             continue
         seen.add(key)
+        items.append({"title": title, "url": full_url})
 
-        if "ihale" in title.lower():
-            items.append((title, href))
+        if len(items) >= limit:
+            break
 
-    # Yedek: hiç yakalayamazsa ilk 10 anlamlı linki al
-    if not items:
-        for a in soup.select("a")[:80]:
-            title = " ".join(a.get_text(" ", strip=True).split())
-            href = a.get("href") or ""
-            if title and len(title) >= 12:
-                items.append((title, href))
-            if len(items) >= 10:
-                break
+    return items
 
-    return items[:10]
+
+def aksu_check_new(state: dict) -> tuple[list[dict], dict]:
+    seen_urls = set(state.get("aksu_seen_urls", []))
+
+    items = aksu_fetch_items(limit=60)
+    new_items = [it for it in items if it["url"] not in seen_urls]
+
+    # state güncelle (en fazla 300 adet sakla)
+    for it in items:
+        seen_urls.add(it["url"])
+    state["aksu_seen_urls"] = list(seen_urls)[:300]
+
+    return new_items, state
+
+
+# ----------------------------
+# 2) EKAP: bülten PDF bul → indir → metin çıkar → Antalya + Aksu filtrele
+# ----------------------------
+def ekap_find_latest_pdf_url() -> str | None:
+    r = http_get(EKAP_BULTEN_URL)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    # Sayfadaki PDF linklerini ara
+    pdf_links = []
+    for a in soup.select("a"):
+        href = (a.get("href") or "").strip()
+        if not href:
+            continue
+        if ".pdf" in href.lower():
+            pdf_links.append(urljoin(EKAP_BULTEN_URL, href))
+
+    if not pdf_links:
+        return None
+
+    # Genelde en güncel ilklerde olur; yine de ilkini alıyoruz
+    return pdf_links[0]
+
+
+def ekap_pdf_text(pdf_bytes: bytes) -> str:
+    # pypdf bytes'tan okuyalım
+    import io
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    texts = []
+    for page in reader.pages:
+        t = page.extract_text() or ""
+        if t:
+            texts.append(t)
+    return "\n".join(texts)
+
+
+def ekap_extract_relevant_lines(text: str) -> list[str]:
+    """
+    Basit yaklaşım: satır satır gez, ANTALYA ve AKSU birlikte geçen satırları al.
+    (Bülten formatı değişken olduğu için 'line' bazlı yakalama en güvenlisi.)
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    out = []
+    for ln in lines:
+        up = ln.upper()
+        if "ANTALYA" in up and "AKSU" in up:
+            # çok uzun satırları kırp
+            if len(ln) > 220:
+                ln = ln[:220] + "…"
+            out.append(ln)
+    return out
+
+
+def ekap_check_new(state: dict) -> tuple[list[str], dict]:
+    latest_pdf_url = ekap_find_latest_pdf_url()
+    if not latest_pdf_url:
+        return [], state
+
+    # PDF değişti mi?
+    last_pdf_url = state.get("ekap_last_pdf_url")
+    seen_lines = set(state.get("ekap_seen_lines", []))
+
+    # PDF indir
+    r = http_get(latest_pdf_url)
+    r.raise_for_status()
+    text = ekap_pdf_text(r.content)
+
+    relevant = ekap_extract_relevant_lines(text)
+
+    # yeni satırlar
+    new_lines = [ln for ln in relevant if ln not in seen_lines]
+
+    # state güncelle
+    for ln in relevant:
+        seen_lines.add(ln)
+    state["ekap_seen_lines"] = list(seen_lines)[:2000]
+    state["ekap_last_pdf_url"] = latest_pdf_url
+
+    # PDF yeni olmasa bile (aynı PDF), satırlar içinde yeni bir şey çıkmaz zaten.
+    # PDF tamamen yenilendiğinde de satırlar yeniden değerlendirilecek.
+
+    return new_lines, state
 
 
 def main() -> None:
@@ -73,27 +185,26 @@ def main() -> None:
         raise SystemExit("BOT_TOKEN veya CHAT_ID eksik. GitHub Secrets ayarlarını kontrol edin.")
 
     state = load_state()
-    last_hash = state.get("last_hash")
 
-    items = fetch_top_items()
-    snapshot = "\n".join([f"- {t}" for t, _ in items])
-    current_hash = sha(snapshot)
+    # AKSU Belediyesi
+    aksu_new, state = aksu_check_new(state)
 
-    # İlk çalıştırma: state kaydet + test mesajı gönder (1 kere)
-    if not last_hash:
-        save_state({"last_hash": current_hash})
-        return
+    # EKAP (Antalya + Aksu)
+    ekap_new, state = ekap_check_new(state)
 
-    # Değişiklik varsa bildir
-    if current_hash != last_hash:
-        msg = (
-            "🆕 Aksu ihaleler sayfasında güncelleme tespit edildi.\n"
-            f"{CHECK_URL}\n\n"
-            "Son görünen başlıklar:\n"
-            f"{snapshot}"
-        )
+    # Bildirim gönder
+    if aksu_new:
+        for it in aksu_new:
+            send_telegram(f"🆕 Aksu Belediyesi ihale:\n{it['title']}\n{it['url']}")
+            time.sleep(1)  # Telegram rate limit için küçük bekleme
+
+    if ekap_new:
+        # çok satır çıkarsa tek mesajda gruplayalım
+        chunk = ekap_new[:20]
+        msg = "🆕 EKAP Bülteninde ANTALYA + AKSU geçen yeni kayıt(lar):\n\n" + "\n".join(f"- {ln}" for ln in chunk)
         send_telegram(msg)
-        save_state({"last_hash": current_hash})
+
+    save_state(state)
 
 
 if __name__ == "__main__":
