@@ -82,7 +82,6 @@ def main() -> None:
     # İlk çalıştırma: state kaydet + test mesajı gönder (1 kere)
     if not last_hash:
         save_state({"last_hash": current_hash})
-        send_telegram("Test mesajı: Bot aktif çalışıyor.")
         return
 
     # Değişiklik varsa bildir
