@@ -2,11 +2,15 @@ name: Aksu Ihale Checker
 
 on:
   schedule:
-    - cron: "*/2 * * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: aksu-ihale-checker
+  cancel-in-progress: true
 
 jobs:
   run-check:
@@ -24,7 +28,7 @@ jobs:
         run: |
           pip install requests beautifulsoup4
 
-      - name: Run bot
+      - name: Run bot (tender check)
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
@@ -36,10 +40,10 @@ jobs:
         run: |
           date -u +"%Y-%m-%d %H:%M:%S UTC" > last_run.txt
 
-      - name: Commit state and heartbeat if changed
+      - name: Commit state and last_run if changed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add state.json last_run.txt || true
-          git commit -m "Update state / heartbeat" || echo "No changes"
+          git commit -m "Update state / last_run" || echo "No changes"
           git push || echo "No push needed"
