@@ -22,14 +22,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4 pypdf
+          pip install requests beautifulsoup4
 
       - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           AKSU_URL: "https://www.aksu.bel.tr/ihaleler"
-          EKAP_BULTEN_URL: "https://ekap.kik.gov.tr/ekap/ilan/bultenindirme.aspx"
         run: |
           python bot.py
 
