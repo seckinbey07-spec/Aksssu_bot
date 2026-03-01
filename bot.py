@@ -5,6 +5,9 @@ from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================
 # Aksu Belediyesi Kaynağı
@@ -16,9 +19,9 @@ AKSU_URL = os.getenv("AKSU_URL", "https://www.aksu.bel.tr/ihaleler")
 # =========================
 ILAN_ENABLED = os.getenv("ILAN_ENABLED", "1") == "1"
 ILAN_BASE_URL = "https://www.ilan.gov.tr"
-ILAN_SEARCH_ENDPOINT = f"{ILAN_BASE_URL}/api/api/services/app/Ad/AdsByFilter"  # :contentReference[oaicite:1]{index=1}
-ILAN_AD_TYPE_ID = int(os.getenv("ILAN_AD_TYPE_ID", "3"))  # 3 = İHALE :contentReference[oaicite:2]{index=2}
-ILAN_CITY_PLATE = int(os.getenv("ILAN_CITY_PLATE", "7"))  # 07 = Antalya (plaka mantığıyla)
+ILAN_SEARCH_ENDPOINT = f"{ILAN_BASE_URL}/api/api/services/app/Ad/AdsByFilter"
+ILAN_AD_TYPE_ID = int(os.getenv("ILAN_AD_TYPE_ID", "3"))  # 3 = İhale
+ILAN_CITY_PLATE = int(os.getenv("ILAN_CITY_PLATE", "7"))  # 07 = Antalya
 ILAN_SEARCH_TEXT = os.getenv("ILAN_SEARCH_TEXT", "kiralama")
 ILAN_PAGE_SIZE = int(os.getenv("ILAN_PAGE_SIZE", "20"))
 
@@ -119,13 +122,6 @@ def ilan_api_search_ads(
     page_size: int = 20,
     current_page: int = 1,
 ) -> list[dict]:
-    """
-    ilan.gov.tr AdsByFilter API:
-    POST https://www.ilan.gov.tr/api/api/services/app/Ad/AdsByFilter :contentReference[oaicite:3]{index=3}
-
-    Dönen kayıtlar: [{"id","title","full_url","publish_date","advertiser","city","county"}]
-    """
-    # Minimal ama uyumlu header seti
     headers = {
         "accept": "text/plain",
         "content-type": "application/json-patch+json",
@@ -137,19 +133,22 @@ def ilan_api_search_ads(
 
     keys = {}
     if search_text:
-        # Genel arama anahtarı "q" :contentReference[oaicite:4]{index=4}
         keys["q"] = [search_text]
 
-    # Şehir filtresi: "aci" :contentReference[oaicite:5]{index=5}
     keys["aci"] = [city_plate]
-
-    # İlan türü filtresi: "ats" (3=İhale) :contentReference[oaicite:6]{index=6}
     keys["ats"] = [ad_type_id]
 
     skip_count = (current_page - 1) * page_size
     payload = {"keys": keys, "skipCount": skip_count, "maxResultCount": page_size}
 
-    r = requests.post(ILAN_SEARCH_ENDPOINT, json=payload, headers=headers, timeout=45)
+    # SSL doğrulama hatası için verify=False
+    r = requests.post(
+        ILAN_SEARCH_ENDPOINT,
+        json=payload,
+        headers=headers,
+        timeout=45,
+        verify=False,
+    )
     r.raise_for_status()
     data = r.json()
 
@@ -173,7 +172,6 @@ def ilan_api_search_ads(
             }
         )
 
-    # Ek güvenlik: başlık içinde kiralama yoksa (bazı aramalar geniş dönebilir)
     kw = search_text.lower().strip()
     if kw:
         out = [x for x in out if kw in (x["title"] or "").lower()]
@@ -203,20 +201,19 @@ def ilan_check_new(state: dict) -> tuple[list[dict], dict]:
 
 
 def main() -> None:
-    # HEARTBEAT sadece env=1 ise
     if HEARTBEAT_ENABLED:
         send_telegram("HEARTBEAT: Bot çalıştı ve tetiklendi.")
 
     state = load_state()
 
-    # 1) Aksu yeni ihaleler
+    # 1) Aksu
     aksu_new, state = aksu_check_new(state)
     if aksu_new:
         for it in aksu_new:
             send_telegram(f"🆕 Aksu Belediyesi ihale:\n{it['title']}\n{it['url']}")
             time.sleep(1)
 
-    # 2) Antalya genel (ilan.gov.tr) kiralama ihaleleri
+    # 2) ilan.gov.tr (Antalya + kiralama)
     if ILAN_ENABLED:
         ilan_new, state = ilan_check_new(state)
         if ilan_new:
@@ -229,7 +226,7 @@ def main() -> None:
                 if it.get("publish_date"):
                     extra.append(f"Yayın: {it['publish_date']}")
 
-                extra_line = f"\n" + " | ".join(extra) if extra else ""
+                extra_line = ("\n" + " | ".join(extra)) if extra else ""
                 send_telegram(
                     f"🆕 Antalya (ilan.gov.tr) kiralama ihalesi:\n{it['title']}\n{it['full_url']}{extra_line}"
                 )
