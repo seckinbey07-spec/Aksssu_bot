@@ -17,7 +17,7 @@ CHAT_IDS = os.getenv("CHAT_IDS", "")
 CHAT_ID_LIST = [x.strip() for x in CHAT_IDS.split(",") if x.strip()]
 
 HEARTBEAT_ENABLED = os.getenv("HEARTBEAT", "0") == "1"
-DEBUG_ENABLED = os.getenv("DEBUG", "0") == "1"
+DEBUG_ENABLED = os.getenv("DEBUG", "1") == "1"
 INIT_SILENT = os.getenv("INIT_SILENT", "0") == "1"
 
 STATE_PATH = "state.json"
