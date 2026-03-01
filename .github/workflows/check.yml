@@ -35,7 +35,7 @@ jobs:
 
           # Spam kapalı
           HEARTBEAT: "0"
-          DEBUG: "0"
+          DEBUG: "1"
 
           # İlk kurulum: eski ilanları "yeni" sayma (1 kere 1 yap, sonra 0)
           INIT_SILENT: "0"
