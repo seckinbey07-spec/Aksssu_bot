@@ -33,7 +33,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_IDS: ${{ secrets.CHAT_IDS }}
           HEARTBEAT: "0"
-          DEBUG: "1"
+          DEBUG: "0"
 
           # ilan.gov.tr arama (şimdilik genel arama)
           ILAN_ENABLED: "1"
