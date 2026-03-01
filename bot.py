@@ -17,10 +17,8 @@ STATE_PATH = "state.json"
 ILAN_BASE_URL = "https://www.ilan.gov.tr"
 ILAN_SEARCH_ENDPOINT = f"{ILAN_BASE_URL}/api/api/services/app/Ad/AdsByFilter"
 
-# Sadece kiralama kelimesi ile çekiyoruz
 ILAN_SEARCH_TEXT = "kiralama"
 ILAN_PAGE_SIZE = 50
-
 
 EXCLUDE_WORDS = [
     "iflas",
@@ -28,8 +26,6 @@ EXCLUDE_WORDS = [
     "arsa",
     "mahkeme",
     "teblig",
-    "geçici mühlet",
-    "kesin mühlet",
 ]
 
 
@@ -78,18 +74,19 @@ def ilan_search():
 
     for ad in ads:
         title = (ad.get("title") or "").lower()
+        city = (ad.get("addressCityName") or "").lower()
         url_str = ad.get("urlStr") or ""
         full_url = ILAN_BASE_URL + url_str
 
-        # Antalya geçmeli
-        if "antalya" not in title:
+        # Antalya filtresi şehir alanından
+        if "antalya" not in city:
             continue
 
-        # ihale kelimesi geçmeli
-        if "ihale" not in title:
+        # kiralama kelimesi başlıkta geçmeli
+        if "kiralama" not in title:
             continue
 
-        # İstenmeyen kelimeleri ele
+        # istenmeyen kelimeleri ele
         if any(word in title for word in EXCLUDE_WORDS):
             continue
 
