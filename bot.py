@@ -49,10 +49,6 @@ def http_get(url: str) -> requests.Response:
 
 
 def aksu_fetch_items(limit: int = 80) -> list[dict]:
-    """
-    Aksu Belediyesi ihaleler sayfasından ihale linklerini çeker.
-    Dönen: [{"title": "...", "url": "..."}]
-    """
     r = http_get(AKSU_URL)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
@@ -68,7 +64,6 @@ def aksu_fetch_items(limit: int = 80) -> list[dict]:
         if len(title) < 8:
             continue
 
-        # Başlıkta "ihale" geçenleri al
         if "ihale" not in title.lower():
             continue
 
@@ -87,13 +82,12 @@ def aksu_fetch_items(limit: int = 80) -> list[dict]:
     return items
 
 
-def aksu_check_new(state: dict) -> tuple[list[dict], dict]:
+def aksu_check_new(state: dict):
     seen_urls = set(state.get("aksu_seen_urls", []))
 
     items = aksu_fetch_items(limit=80)
     new_items = [it for it in items if it["url"] not in seen_urls]
 
-    # state güncelle (en fazla 500 link sakla)
     for it in items:
         seen_urls.add(it["url"])
     state["aksu_seen_urls"] = list(seen_urls)[:500]
@@ -102,18 +96,19 @@ def aksu_check_new(state: dict) -> tuple[list[dict], dict]:
 
 
 def main() -> None:
-    # 1) HEARTBEAT (env ile kontrol: default kapalı)
+    # HEARTBEAT sadece env=1 ise çalışır
     if HEARTBEAT_ENABLED:
         send_telegram("HEARTBEAT: Bot çalıştı ve tetiklendi.")
 
-    # 2) Normal iş: yeni ihaleleri kontrol et
     state = load_state()
     new_items, state = aksu_check_new(state)
 
-    # 3) Sadece yeni ihale varsa mesaj at (yoksa sessiz)
+    # Sadece yeni ihale varsa mesaj gönder
     if new_items:
         for it in new_items:
-            send_telegram(f"🆕 Aksu Belediyesi ihale:\n{it['title']}\n{it['url']}")
+            send_telegram(
+                f"🆕 Aksu Belediyesi ihale:\n{it['title']}\n{it['url']}"
+            )
             time.sleep(1)
 
     save_state(state)
