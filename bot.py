@@ -13,6 +13,9 @@ AKSU_URL = os.getenv("AKSU_URL", "https://www.aksu.bel.tr/ihaleler")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
+# HEARTBEAT kontrolü (default kapalı)
+HEARTBEAT_ENABLED = os.getenv("HEARTBEAT", "0") == "1"
+
 # State
 STATE_PATH = "state.json"
 
@@ -99,13 +102,15 @@ def aksu_check_new(state: dict) -> tuple[list[dict], dict]:
 
 
 def main() -> None:
-    # 1) HEARTBEAT (her çalıştırmada 1 mesaj)
-    send_telegram("HEARTBEAT: Bot çalıştı ve tetiklendi.")
+    # 1) HEARTBEAT (env ile kontrol: default kapalı)
+    if HEARTBEAT_ENABLED:
+        send_telegram("HEARTBEAT: Bot çalıştı ve tetiklendi.")
 
     # 2) Normal iş: yeni ihaleleri kontrol et
     state = load_state()
     new_items, state = aksu_check_new(state)
 
+    # 3) Sadece yeni ihale varsa mesaj at (yoksa sessiz)
     if new_items:
         for it in new_items:
             send_telegram(f"🆕 Aksu Belediyesi ihale:\n{it['title']}\n{it['url']}")
