@@ -33,7 +33,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_IDS: ${{ secrets.CHAT_IDS }}
 
-          DEBUG: "1"
+          DEBUG: "0"
           INIT_SILENT: "0"
 
           ILAN_ENABLED: "1"
