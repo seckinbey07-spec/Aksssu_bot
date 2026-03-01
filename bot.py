@@ -34,6 +34,9 @@ CHAT_ID = os.getenv("CHAT_ID")
 # HEARTBEAT (default kapalı)
 HEARTBEAT_ENABLED = os.getenv("HEARTBEAT", "0") == "1"
 
+# DEBUG (default kapalı) -> açıkken 1 kez özet mesaj atar
+DEBUG_ENABLED = os.getenv("DEBUG", "0") == "1"
+
 # State
 STATE_PATH = "state.json"
 
@@ -99,7 +102,7 @@ def aksu_fetch_items(limit: int = 80) -> list[dict]:
     return items
 
 
-def aksu_check_new(state: dict) -> tuple[list[dict], dict]:
+def aksu_check_new(state: dict) -> tuple[list[dict], dict, int]:
     seen_urls = set(state.get("aksu_seen_urls", []))
 
     items = aksu_fetch_items(limit=80)
@@ -109,7 +112,7 @@ def aksu_check_new(state: dict) -> tuple[list[dict], dict]:
         seen_urls.add(it["url"])
     state["aksu_seen_urls"] = list(seen_urls)[:500]
 
-    return new_items, state
+    return new_items, state, len(items)
 
 
 # =========================
@@ -121,7 +124,7 @@ def ilan_api_search_ads(
     ad_type_id: int,
     page_size: int = 20,
     current_page: int = 1,
-) -> list[dict]:
+) -> tuple[list[dict], int]:
     headers = {
         "accept": "text/plain",
         "content-type": "application/json-patch+json",
@@ -141,7 +144,6 @@ def ilan_api_search_ads(
     skip_count = (current_page - 1) * page_size
     payload = {"keys": keys, "skipCount": skip_count, "maxResultCount": page_size}
 
-    # SSL doğrulama hatası için verify=False
     r = requests.post(
         ILAN_SEARCH_ENDPOINT,
         json=payload,
@@ -154,6 +156,7 @@ def ilan_api_search_ads(
 
     result = data.get("result") or {}
     ads = result.get("ads") or []
+    raw_count = len(ads)
 
     out = []
     for ad in ads:
@@ -167,22 +170,21 @@ def ilan_api_search_ads(
                 "advertiser": ad.get("advertiserName"),
                 "city": ad.get("addressCityName"),
                 "county": ad.get("addressCountyName"),
-                "source": ad.get("adSourceName"),
-                "ad_no": ad.get("adNo"),
             }
         )
 
+    # DİKKAT: Bu filtre çok sert olabilir; debug için sayım alıyoruz.
     kw = search_text.lower().strip()
     if kw:
         out = [x for x in out if kw in (x["title"] or "").lower()]
 
-    return out
+    return out, raw_count
 
 
-def ilan_check_new(state: dict) -> tuple[list[dict], dict]:
+def ilan_check_new(state: dict) -> tuple[list[dict], dict, int, int]:
     seen_ids = set(state.get("ilan_seen_ids", []))
 
-    items = ilan_api_search_ads(
+    items, raw_count = ilan_api_search_ads(
         search_text=ILAN_SEARCH_TEXT,
         city_plate=ILAN_CITY_PLATE,
         ad_type_id=ILAN_AD_TYPE_ID,
@@ -197,7 +199,7 @@ def ilan_check_new(state: dict) -> tuple[list[dict], dict]:
             seen_ids.add(it["id"])
 
     state["ilan_seen_ids"] = list(seen_ids)[:1000]
-    return new_items, state
+    return new_items, state, raw_count, len(items)
 
 
 def main() -> None:
@@ -206,31 +208,42 @@ def main() -> None:
 
     state = load_state()
 
-    # 1) Aksu
-    aksu_new, state = aksu_check_new(state)
+    aksu_new, state, aksu_total = aksu_check_new(state)
+
+    ilan_new = []
+    ilan_raw = 0
+    ilan_after_kw = 0
+    if ILAN_ENABLED:
+        ilan_new, state, ilan_raw, ilan_after_kw = ilan_check_new(state)
+
+    # DEBUG: tek seferlik özet (spam değil)
+    if DEBUG_ENABLED:
+        msg = (
+            "DEBUG ÖZET\n"
+            f"Aksu: listelenen={aksu_total}, yeni={len(aksu_new)}\n"
+            f"ilan.gov.tr: raw={ilan_raw}, kw_sonrası={ilan_after_kw}, yeni={len(ilan_new)}\n"
+            f"Arama='{ILAN_SEARCH_TEXT}', plaka={ILAN_CITY_PLATE}, type={ILAN_AD_TYPE_ID}"
+        )
+        send_telegram(msg)
+
+    # Normal bildirimler
     if aksu_new:
         for it in aksu_new:
             send_telegram(f"🆕 Aksu Belediyesi ihale:\n{it['title']}\n{it['url']}")
             time.sleep(1)
 
-    # 2) ilan.gov.tr (Antalya + kiralama)
-    if ILAN_ENABLED:
-        ilan_new, state = ilan_check_new(state)
-        if ilan_new:
-            for it in ilan_new:
-                extra = []
-                if it.get("advertiser"):
-                    extra.append(it["advertiser"])
-                if it.get("county"):
-                    extra.append(it["county"])
-                if it.get("publish_date"):
-                    extra.append(f"Yayın: {it['publish_date']}")
-
-                extra_line = ("\n" + " | ".join(extra)) if extra else ""
-                send_telegram(
-                    f"🆕 Antalya (ilan.gov.tr) kiralama ihalesi:\n{it['title']}\n{it['full_url']}{extra_line}"
-                )
-                time.sleep(1)
+    if ILAN_ENABLED and ilan_new:
+        for it in ilan_new:
+            extra = []
+            if it.get("county"):
+                extra.append(it["county"])
+            if it.get("publish_date"):
+                extra.append(f"Yayın: {it['publish_date']}")
+            extra_line = ("\n" + " | ".join(extra)) if extra else ""
+            send_telegram(
+                f"🆕 Antalya (ilan.gov.tr) kiralama ihalesi:\n{it['title']}\n{it['full_url']}{extra_line}"
+            )
+            time.sleep(1)
 
     save_state(state)
 
