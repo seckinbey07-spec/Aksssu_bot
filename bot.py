@@ -6,61 +6,59 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# =========================
-# Telegram
-# =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_IDS = os.getenv("CHAT_IDS", "")
 CHAT_ID_LIST = [x.strip() for x in CHAT_IDS.split(",") if x.strip()]
 
 DEBUG_ENABLED = os.getenv("DEBUG", "0") == "1"
-INIT_SILENT = os.getenv("INIT_SILENT", "0") == "1"
 
 STATE_PATH = "state.json"
 
-# =========================
-# ilan.gov.tr
-# =========================
-ILAN_ENABLED = os.getenv("ILAN_ENABLED", "1") == "1"
 ILAN_BASE_URL = "https://www.ilan.gov.tr"
 ILAN_SEARCH_ENDPOINT = f"{ILAN_BASE_URL}/api/api/services/app/Ad/AdsByFilter"
-ILAN_SEARCH_TEXT = os.getenv("ILAN_SEARCH_TEXT", "antalya kiralama").strip()
-ILAN_PAGE_SIZE = int(os.getenv("ILAN_PAGE_SIZE", "50"))
+
+# Sadece kiralama kelimesi ile çekiyoruz
+ILAN_SEARCH_TEXT = "kiralama"
+ILAN_PAGE_SIZE = 50
 
 
-def send_telegram(text: str) -> None:
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN eksik.")
-    if not CHAT_ID_LIST:
-        raise RuntimeError("CHAT_IDS eksik. Örn: 8714272187")
+EXCLUDE_WORDS = [
+    "iflas",
+    "konkordato",
+    "arsa",
+    "mahkeme",
+    "teblig",
+    "geçici mühlet",
+    "kesin mühlet",
+]
 
+
+def send_telegram(text: str):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     for chat_id in CHAT_ID_LIST:
-        r = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=30)
-        r.raise_for_status()
+        requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=30)
 
 
-def load_state() -> dict:
+def load_state():
     if not os.path.exists(STATE_PATH):
         return {}
     with open(STATE_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def save_state(state: dict) -> None:
+def save_state(state):
     with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def ilan_search() -> tuple[list[dict], int]:
+def ilan_search():
     headers = {
         "content-type": "application/json-patch+json",
         "user-agent": "Mozilla/5.0",
-        "accept": "text/plain",
     }
 
     payload = {
-        "keys": {"q": [ILAN_SEARCH_TEXT]} if ILAN_SEARCH_TEXT else {},
+        "keys": {"q": [ILAN_SEARCH_TEXT]},
         "skipCount": 0,
         "maxResultCount": ILAN_PAGE_SIZE,
     }
@@ -72,57 +70,54 @@ def ilan_search() -> tuple[list[dict], int]:
         timeout=45,
         verify=False,
     )
-    r.raise_for_status()
 
     data = r.json()
     ads = (data.get("result") or {}).get("ads") or []
-    raw_count = len(ads)
 
-    out = []
+    results = []
+
     for ad in ads:
-        url_str = (ad.get("urlStr") or "").strip()
-        out.append(
-            {
-                "id": str(ad.get("id")),
-                "title": (ad.get("title") or "").strip(),
-                "url": ILAN_BASE_URL + url_str if url_str else ILAN_BASE_URL,
-            }
-        )
+        title = (ad.get("title") or "").lower()
+        url_str = ad.get("urlStr") or ""
+        full_url = ILAN_BASE_URL + url_str
 
-    return out, raw_count
+        # Antalya geçmeli
+        if "antalya" not in title:
+            continue
+
+        # ihale kelimesi geçmeli
+        if "ihale" not in title:
+            continue
+
+        # İstenmeyen kelimeleri ele
+        if any(word in title for word in EXCLUDE_WORDS):
+            continue
+
+        results.append({
+            "id": str(ad.get("id")),
+            "title": ad.get("title"),
+            "url": full_url
+        })
+
+    return results, len(ads)
 
 
-def main() -> None:
+def main():
     state = load_state()
-    seen = set(state.get("ilan_seen_ids", []))
+    seen = set(state.get("seen_ids", []))
 
-    items = []
-    raw = 0
-    if ILAN_ENABLED:
-        items, raw = ilan_search()
-
-    new_items = [x for x in items if x["id"] and x["id"] not in seen]
-
-    # INIT_SILENT: ilk kurulumda eski ilanları "yeni" sayma
-    if INIT_SILENT:
-        for x in items:
-            if x["id"]:
-                seen.add(x["id"])
-        state["ilan_seen_ids"] = list(seen)[:3000]
-        save_state(state)
-        if DEBUG_ENABLED:
-            send_telegram(f"DEBUG (INIT_SILENT)\nraw={raw}\nsetlenen={len(items)}\nArama='{ILAN_SEARCH_TEXT}'")
-        return
+    items, raw_count = ilan_search()
+    new_items = [x for x in items if x["id"] not in seen]
 
     if DEBUG_ENABLED:
-        send_telegram(f"DEBUG\nraw={raw}\nsonuc={len(items)}\nyeni={len(new_items)}\nArama='{ILAN_SEARCH_TEXT}'")
+        send_telegram(f"DEBUG\nraw={raw_count}\nfiltre_sonrasi={len(items)}\nyeni={len(new_items)}")
 
     for it in new_items:
-        send_telegram(f"🆕 Antalya kiralama (ilan.gov.tr):\n{it['title']}\n{it['url']}")
+        send_telegram(f"🆕 Antalya kiralama ihalesi:\n{it['title']}\n{it['url']}")
         seen.add(it["id"])
         time.sleep(1)
 
-    state["ilan_seen_ids"] = list(seen)[:3000]
+    state["seen_ids"] = list(seen)
     save_state(state)
 
 
