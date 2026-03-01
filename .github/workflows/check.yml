@@ -33,6 +33,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           AKSU_URL: "https://www.aksu.bel.tr/ihaleler"
+          HEARTBEAT: "0"
         run: |
           python bot.py
 
