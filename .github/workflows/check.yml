@@ -34,6 +34,13 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           AKSU_URL: "https://www.aksu.bel.tr/ihaleler"
           HEARTBEAT: "0"
+
+          # Antalya geneli ilan.gov.tr "kiralama" ihaleleri
+          ILAN_ENABLED: "1"
+          ILAN_CITY_PLATE: "7"
+          ILAN_SEARCH_TEXT: "kiralama"
+          ILAN_AD_TYPE_ID: "3"
+          ILAN_PAGE_SIZE: "20"
         run: |
           python bot.py
 
