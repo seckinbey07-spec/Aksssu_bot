@@ -1,4 +1,4 @@
-name: Aksu Ihale Checker
+name: Ihale Checker
 
 on:
   schedule:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: aksu-ihale-checker
+  group: ihale-checker
   cancel-in-progress: true
 
 jobs:
@@ -28,20 +28,16 @@ jobs:
         run: |
           pip install requests beautifulsoup4 urllib3
 
-      - name: Run bot (tender check)
+      - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-          AKSU_URL: "https://www.aksu.bel.tr/ihaleler"
+          CHAT_IDS: ${{ secrets.CHAT_IDS }}
           HEARTBEAT: "0"
-
-          # DEBUG: 1 yapınca Telegram'a 1 tane "DEBUG ÖZET" mesajı atar (spam değil)
           DEBUG: "1"
 
-          # Antalya geneli ilan.gov.tr "kiralama" ihaleleri
+          # ilan.gov.tr arama (şimdilik genel arama)
           ILAN_ENABLED: "1"
           ILAN_SEARCH_TEXT: "kiralama"
-          ILAN_AD_TYPE_ID: "3"
           ILAN_PAGE_SIZE: "20"
         run: |
           python bot.py
