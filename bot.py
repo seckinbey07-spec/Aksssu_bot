@@ -74,7 +74,6 @@ def aksu_fetch_items(limit: int = 80) -> list[dict]:
         if len(title) < 8:
             continue
 
-        # "ihale" geçenleri al
         if "ihale" not in title.lower():
             continue
 
@@ -96,7 +95,6 @@ def aksu_check_new(state: dict) -> tuple[list[dict], dict, int]:
     items = aksu_fetch_items(limit=80)
     new_items = [it for it in items if it["url"] not in seen_urls]
 
-    # state güncelle
     for it in items:
         seen_urls.add(it["url"])
     state["aksu_seen_urls"] = list(seen_urls)[:500]
@@ -105,7 +103,7 @@ def aksu_check_new(state: dict) -> tuple[list[dict], dict, int]:
 
 
 # =========================
-# ilan.gov.tr (Antalya filtre: city_name üzerinden)
+# ilan.gov.tr (Antalya + kiralama)
 # =========================
 ILAN_ENABLED = os.getenv("ILAN_ENABLED", "1") == "1"
 ILAN_BASE_URL = "https://www.ilan.gov.tr"
@@ -132,7 +130,7 @@ def ilan_search() -> tuple[list[dict], int]:
         json=payload,
         headers=headers,
         timeout=45,
-        verify=False,
+        verify=False,  # GitHub Actions SSL hatası için pratik çözüm
     )
     r.raise_for_status()
 
@@ -155,14 +153,20 @@ def ilan_search() -> tuple[list[dict], int]:
             }
         )
 
-    # Antalya filtresi (API plaka filtresi yerine metin filtresi)
-    if ILAN_CITY_NAME:
-        out = [x for x in out if x["city"].strip().lower() == ILAN_CITY_NAME]
-
-    # Başlıkta arama kelimesi geçsin (daha temiz)
+    # Başlıkta arama kelimesi geçsin (spam azaltır)
     if ILAN_SEARCH_TEXT:
         kw = ILAN_SEARCH_TEXT.lower()
-        out = [x for x in out if kw in (x["title"] or "").lower()]
+        out = [x for x in out if kw in (x.get("title") or "").lower()]
+
+    # Antalya filtresi (şehir alanı boş olabiliyor; başlık + şehir metninde arıyoruz)
+    if ILAN_CITY_NAME:
+        city_kw = ILAN_CITY_NAME.lower()
+        filtered = []
+        for x in out:
+            combined = f"{x.get('title','')} {x.get('city','')}".lower()
+            if city_kw in combined:
+                filtered.append(x)
+        out = filtered
 
     return out, raw_count
 
@@ -182,15 +186,12 @@ def ilan_check_new(state: dict) -> tuple[list[dict], dict, int, int]:
 
 
 # =========================
-# EKAP (Stub)
+# EKAP (Stub - sonraki adımda dolduracağız)
 # =========================
 EKAP_ENABLED = os.getenv("EKAP_ENABLED", "0") == "1"
-EKAP_SEARCH_TEXT = os.getenv("EKAP_SEARCH_TEXT", "kiralama").strip()
-EKAP_CITY_NAME = os.getenv("EKAP_CITY_NAME", "Antalya").strip().lower()
 
 
 def ekap_check_new(state: dict) -> tuple[list[dict], dict]:
-    # Şimdilik boş döndürüyoruz. Bir sonraki adımda EKAP için stabil kaynak/endpoint’i sabitleyip burayı dolduracağız.
     return [], state
 
 
@@ -238,7 +239,6 @@ def main():
             f"EKAP yeni={len(ekap_new)}"
         )
 
-    # Bildirimler
     for it in aksu_new:
         send_telegram(f"🆕 Aksu Belediyesi ihale:\n{it['title']}\n{it['url']}")
         time.sleep(1)
@@ -246,8 +246,6 @@ def main():
     for it in ilan_new:
         send_telegram(f"🆕 Antalya kiralama (ilan.gov.tr):\n{it['title']}\n{it['url']}")
         time.sleep(1)
-
-    # EKAP bildirimleri (şimdilik yok)
 
     save_state(state)
 
