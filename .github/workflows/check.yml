@@ -33,27 +33,12 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_IDS: ${{ secrets.CHAT_IDS }}
 
-          # Spam kapalı
-          HEARTBEAT: "0"
           DEBUG: "1"
-
-          # İlk kurulum: eski ilanları "yeni" sayma (1 kere 1 yap, sonra 0)
           INIT_SILENT: "0"
 
-          # Aksu Belediyesi
-          AKSU_ENABLED: "1"
-          AKSU_URL: "https://www.aksu.bel.tr/ihaleler"
-
-          # ilan.gov.tr (Antalya + kiralama)
           ILAN_ENABLED: "1"
-          ILAN_SEARCH_TEXT: "kiralama"
-          ILAN_CITY_NAME: "Antalya"
-          ILAN_PAGE_SIZE: "30"
-
-          # EKAP (şimdilik stub)
-          EKAP_ENABLED: "0"
-          EKAP_SEARCH_TEXT: "kiralama"
-          EKAP_CITY_NAME: "Antalya"
+          ILAN_SEARCH_TEXT: "antalya kiralama"
+          ILAN_PAGE_SIZE: "50"
         run: |
           python bot.py
 
