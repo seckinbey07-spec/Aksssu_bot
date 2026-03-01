@@ -6,14 +6,29 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-# Kaynak
+# =========================
+# Aksu Belediyesi Kaynağı
+# =========================
 AKSU_URL = os.getenv("AKSU_URL", "https://www.aksu.bel.tr/ihaleler")
 
+# =========================
+# ilan.gov.tr Kaynağı (Antalya + kiralama)
+# =========================
+ILAN_ENABLED = os.getenv("ILAN_ENABLED", "1") == "1"
+ILAN_BASE_URL = "https://www.ilan.gov.tr"
+ILAN_SEARCH_ENDPOINT = f"{ILAN_BASE_URL}/api/api/services/app/Ad/AdsByFilter"  # :contentReference[oaicite:1]{index=1}
+ILAN_AD_TYPE_ID = int(os.getenv("ILAN_AD_TYPE_ID", "3"))  # 3 = İHALE :contentReference[oaicite:2]{index=2}
+ILAN_CITY_PLATE = int(os.getenv("ILAN_CITY_PLATE", "7"))  # 07 = Antalya (plaka mantığıyla)
+ILAN_SEARCH_TEXT = os.getenv("ILAN_SEARCH_TEXT", "kiralama")
+ILAN_PAGE_SIZE = int(os.getenv("ILAN_PAGE_SIZE", "20"))
+
+# =========================
 # Telegram
+# =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# HEARTBEAT kontrolü (default kapalı)
+# HEARTBEAT (default kapalı)
 HEARTBEAT_ENABLED = os.getenv("HEARTBEAT", "0") == "1"
 
 # State
@@ -41,13 +56,12 @@ def save_state(state: dict) -> None:
 
 
 def http_get(url: str) -> requests.Response:
-    return requests.get(
-        url,
-        timeout=45,
-        headers={"User-Agent": "Mozilla/5.0"},
-    )
+    return requests.get(url, timeout=45, headers={"User-Agent": "Mozilla/5.0"})
 
 
+# =========================
+# 1) AKSU: HTML’den ihale linkleri
+# =========================
 def aksu_fetch_items(limit: int = 80) -> list[dict]:
     r = http_get(AKSU_URL)
     r.raise_for_status()
@@ -82,7 +96,7 @@ def aksu_fetch_items(limit: int = 80) -> list[dict]:
     return items
 
 
-def aksu_check_new(state: dict):
+def aksu_check_new(state: dict) -> tuple[list[dict], dict]:
     seen_urls = set(state.get("aksu_seen_urls", []))
 
     items = aksu_fetch_items(limit=80)
@@ -95,21 +109,131 @@ def aksu_check_new(state: dict):
     return new_items, state
 
 
+# =========================
+# 2) ILAN.GOV.TR: API ile Antalya + kiralama ihaleleri
+# =========================
+def ilan_api_search_ads(
+    search_text: str,
+    city_plate: int,
+    ad_type_id: int,
+    page_size: int = 20,
+    current_page: int = 1,
+) -> list[dict]:
+    """
+    ilan.gov.tr AdsByFilter API:
+    POST https://www.ilan.gov.tr/api/api/services/app/Ad/AdsByFilter :contentReference[oaicite:3]{index=3}
+
+    Dönen kayıtlar: [{"id","title","full_url","publish_date","advertiser","city","county"}]
+    """
+    # Minimal ama uyumlu header seti
+    headers = {
+        "accept": "text/plain",
+        "content-type": "application/json-patch+json",
+        "origin": "https://www.ilan.gov.tr",
+        "referer": "https://www.ilan.gov.tr/ilan/tum-ilanlar",
+        "user-agent": "Mozilla/5.0",
+        "x-requested-with": "XMLHttpRequest",
+    }
+
+    keys = {}
+    if search_text:
+        # Genel arama anahtarı "q" :contentReference[oaicite:4]{index=4}
+        keys["q"] = [search_text]
+
+    # Şehir filtresi: "aci" :contentReference[oaicite:5]{index=5}
+    keys["aci"] = [city_plate]
+
+    # İlan türü filtresi: "ats" (3=İhale) :contentReference[oaicite:6]{index=6}
+    keys["ats"] = [ad_type_id]
+
+    skip_count = (current_page - 1) * page_size
+    payload = {"keys": keys, "skipCount": skip_count, "maxResultCount": page_size}
+
+    r = requests.post(ILAN_SEARCH_ENDPOINT, json=payload, headers=headers, timeout=45)
+    r.raise_for_status()
+    data = r.json()
+
+    result = data.get("result") or {}
+    ads = result.get("ads") or []
+
+    out = []
+    for ad in ads:
+        url_str = ad.get("urlStr") or ""
+        out.append(
+            {
+                "id": str(ad.get("id")),
+                "title": ad.get("title") or "",
+                "full_url": f"{ILAN_BASE_URL}{url_str}" if url_str else ILAN_BASE_URL,
+                "publish_date": ad.get("publishStartDate"),
+                "advertiser": ad.get("advertiserName"),
+                "city": ad.get("addressCityName"),
+                "county": ad.get("addressCountyName"),
+                "source": ad.get("adSourceName"),
+                "ad_no": ad.get("adNo"),
+            }
+        )
+
+    # Ek güvenlik: başlık içinde kiralama yoksa (bazı aramalar geniş dönebilir)
+    kw = search_text.lower().strip()
+    if kw:
+        out = [x for x in out if kw in (x["title"] or "").lower()]
+
+    return out
+
+
+def ilan_check_new(state: dict) -> tuple[list[dict], dict]:
+    seen_ids = set(state.get("ilan_seen_ids", []))
+
+    items = ilan_api_search_ads(
+        search_text=ILAN_SEARCH_TEXT,
+        city_plate=ILAN_CITY_PLATE,
+        ad_type_id=ILAN_AD_TYPE_ID,
+        page_size=ILAN_PAGE_SIZE,
+        current_page=1,
+    )
+
+    new_items = [it for it in items if it["id"] and it["id"] not in seen_ids]
+
+    for it in items:
+        if it["id"]:
+            seen_ids.add(it["id"])
+
+    state["ilan_seen_ids"] = list(seen_ids)[:1000]
+    return new_items, state
+
+
 def main() -> None:
-    # HEARTBEAT sadece env=1 ise çalışır
+    # HEARTBEAT sadece env=1 ise
     if HEARTBEAT_ENABLED:
         send_telegram("HEARTBEAT: Bot çalıştı ve tetiklendi.")
 
     state = load_state()
-    new_items, state = aksu_check_new(state)
 
-    # Sadece yeni ihale varsa mesaj gönder
-    if new_items:
-        for it in new_items:
-            send_telegram(
-                f"🆕 Aksu Belediyesi ihale:\n{it['title']}\n{it['url']}"
-            )
+    # 1) Aksu yeni ihaleler
+    aksu_new, state = aksu_check_new(state)
+    if aksu_new:
+        for it in aksu_new:
+            send_telegram(f"🆕 Aksu Belediyesi ihale:\n{it['title']}\n{it['url']}")
             time.sleep(1)
+
+    # 2) Antalya genel (ilan.gov.tr) kiralama ihaleleri
+    if ILAN_ENABLED:
+        ilan_new, state = ilan_check_new(state)
+        if ilan_new:
+            for it in ilan_new:
+                extra = []
+                if it.get("advertiser"):
+                    extra.append(it["advertiser"])
+                if it.get("county"):
+                    extra.append(it["county"])
+                if it.get("publish_date"):
+                    extra.append(f"Yayın: {it['publish_date']}")
+
+                extra_line = f"\n" + " | ".join(extra) if extra else ""
+                send_telegram(
+                    f"🆕 Antalya (ilan.gov.tr) kiralama ihalesi:\n{it['title']}\n{it['full_url']}{extra_line}"
+                )
+                time.sleep(1)
 
     save_state(state)
 
