@@ -9,9 +9,13 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
-import urllib3
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# cloudscraper (Cloudflare/WAF bypass için)
+try:
+    import cloudscraper  # type: ignore
+except Exception:
+    cloudscraper = None
+
 
 # -----------------------------
 # ENV
@@ -74,6 +78,16 @@ NEGATIVE_HINTS = [
 ]
 
 ALLOW_KIRAYA_VERME = True  # istemiyorsan False yap
+
+# -----------------------------
+# Regex
+# -----------------------------
+NEXT_DATA_RE = re.compile(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.DOTALL | re.IGNORECASE)
+ADV_RE = re.compile(r"\badv=([A-Z]\d{6})\b", re.IGNORECASE)
+HREF_ILAN_RE = re.compile(r'href\s*=\s*[\'"]?(/ilan/[^\'"\s>]+)', re.IGNORECASE)
+TITLE_RE = re.compile(r"<title>(.*?)</title>", re.DOTALL | re.IGNORECASE)
+OG_TITLE_RE = re.compile(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\'](.*?)["\']', re.IGNORECASE)
+
 
 # -----------------------------
 # Helpers
@@ -148,61 +162,6 @@ def save_seen(seen: Dict[str, str]) -> None:
         json.dump(seen, f, ensure_ascii=False, indent=2)
 
 
-# -----------------------------
-# Telegram
-# -----------------------------
-def tg_send(chat_id: str, text: str) -> None:
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
-    r = requests.post(url, json=payload, timeout=30)
-    if r.status_code != 200 and DEBUG:
-        print(f"Telegram error: {r.status_code} {r.text[:400]}")
-
-
-def tg_broadcast(chat_ids: List[str], text: str) -> None:
-    for cid in chat_ids:
-        tg_send(cid, text)
-        time.sleep(0.25)
-
-
-# -----------------------------
-# HTTP fetch (SSL fallback)
-# -----------------------------
-def http_get(url: str, params: Optional[Dict[str, Any]] = None) -> requests.Response:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; antalya_ihale_bot/3.0)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.7,en;q=0.6",
-        "Connection": "keep-alive",
-    }
-    try:
-        return requests.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
-    except requests.exceptions.SSLError:
-        return requests.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT, verify=False)
-
-
-# -----------------------------
-# Parsing helpers
-# -----------------------------
-NEXT_DATA_RE = re.compile(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.DOTALL | re.IGNORECASE)
-TITLE_RE = re.compile(r"<title>(.*?)</title>", re.DOTALL | re.IGNORECASE)
-OG_TITLE_RE = re.compile(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\'](.*?)["\']', re.IGNORECASE)
-
-ADV_RE = re.compile(r"adv=([A-Z]\d{6})", re.IGNORECASE)
-HREF_ILAN_RE = re.compile(r'href\s*=\s*[\'"]?(/ilan/[^\'"\s>]+)', re.IGNORECASE)
-
-
-def extract_next_data(html: str) -> Optional[Dict[str, Any]]:
-    m = NEXT_DATA_RE.search(html)
-    if not m:
-        return None
-    raw = m.group(1).strip()
-    try:
-        return json.loads(raw)
-    except Exception:
-        return None
-
-
 def walk_json(obj: Any) -> Iterable[Any]:
     stack = [obj]
     while stack:
@@ -214,52 +173,161 @@ def walk_json(obj: Any) -> Iterable[Any]:
             stack.extend(cur)
 
 
-def pick_candidates_from_next(next_data: Dict[str, Any]) -> List[Dict[str, str]]:
+# -----------------------------
+# Telegram
+# -----------------------------
+def tg_send(chat_id: str, text: str) -> None:
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+    try:
+        requests.post(url, json=payload, timeout=30)
+    except Exception:
+        pass
+
+
+def tg_broadcast(chat_ids: List[str], text: str) -> None:
+    for cid in chat_ids:
+        tg_send(cid, text)
+        time.sleep(0.25)
+
+
+# -----------------------------
+# HTTP client (cloudscraper + session)
+# -----------------------------
+def make_session():
+    if cloudscraper is not None:
+        s = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "windows", "desktop": True}
+        )
+        return s
+    return requests.Session()
+
+
+SESSION = make_session()
+
+
+def http_get(url: str) -> requests.Response:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.7,en;q=0.6",
+        "Connection": "keep-alive",
+    }
+    return SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+
+
+def http_get_json(url: str) -> Any:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.7,en;q=0.6",
+        "Connection": "keep-alive",
+    }
+    r = SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+    r.raise_for_status()
+    return r.json()
+
+
+# -----------------------------
+# ilan.gov.tr parsing
+# -----------------------------
+def extract_next_data(html: str) -> Optional[Dict[str, Any]]:
+    m = NEXT_DATA_RE.search(html)
+    if not m:
+        return None
+    raw = m.group(1).strip()
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def detect_block_page(html: str) -> bool:
+    t = norm_text(html[:5000])
+    # Cloudflare / bot protection / access denied sinyalleri
+    bad_markers = [
+        "cloudflare",
+        "attention required",
+        "access denied",
+        "captcha",
+        "bot detection",
+        "verify you are human",
+    ]
+    return any(m in t for m in bad_markers)
+
+
+def next_data_build_id(next_data: Dict[str, Any]) -> Optional[str]:
+    bid = next_data.get("buildId")
+    if isinstance(bid, str) and bid.strip():
+        return bid.strip()
+    return None
+
+
+def build_next_data_url(build_id: str, page: int) -> str:
+    # Next.js data route: /_next/data/<buildId>/ilan/kategori/9/ihale-duyurulari.json?currentPage=0&ats=3
+    return f"https://www.ilan.gov.tr/_next/data/{build_id}/ilan/kategori/9/ihale-duyurulari.json?currentPage={page}&ats=3"
+
+
+def pick_candidates_from_any_json(j: Any, page: int) -> List[Dict[str, str]]:
+    """
+    JSON içinde:
+      - /ilan/ linkleri
+      - adv=Mxxxxxx kodları
+    arar ve URL üretir.
+    """
     out: List[Dict[str, str]] = []
     seen = set()
 
-    for node in walk_json(next_data):
-        if not isinstance(node, dict):
-            continue
-        url = node.get("url") or node.get("link") or node.get("path") or node.get("href")
-        title = node.get("title") or node.get("name") or node.get("baslik")
-        if not url:
-            continue
+    # JSON dump üzerinden adv yakalama (en sağlam)
+    dumped = ""
+    try:
+        dumped = json.dumps(j, ensure_ascii=False)
+    except Exception:
+        dumped = str(j)
 
-        url_s = str(url).strip()
-        title_s = str(title).strip() if title else "İlan"
+    # adv kodları
+    advs = [a.upper() for a in ADV_RE.findall(dumped)]
+    for adv in list(dict.fromkeys(advs)):
+        key = f"ADV::{adv}"
+        if key in seen:
+            continue
+        seen.add(key)
+        url_adv = f"https://www.ilan.gov.tr/ilan/kategori/9/ihale-duyurulari?adv={adv}&currentPage={page}"
+        out.append({"title": f"İlan ({adv})", "url": url_adv})
 
-        # 1) /ilan/ linkleri
-        if "/ilan/" in url_s:
+    # /ilan/ linkleri (varsa)
+    for node in walk_json(j):
+        if not isinstance(node, (dict, str)):
+            continue
+        if isinstance(node, dict):
+            url = node.get("url") or node.get("link") or node.get("path") or node.get("href")
+            title = node.get("title") or node.get("name") or node.get("baslik")
+            if not url:
+                continue
+            url_s = str(url).strip()
+            if "/ilan/" not in url_s:
+                continue
             if url_s.startswith("/"):
                 url_s = "https://www.ilan.gov.tr" + url_s
-            key = url_s
-            if key in seen:
+            if url_s in seen:
                 continue
-            seen.add(key)
-            out.append({"title": title_s, "url": url_s})
-            continue
-
-        # 2) adv= kodu geçen linkler
-        m = ADV_RE.search(url_s)
-        if m:
-            adv = m.group(1).upper()
-            key = f"ADV::{adv}"
-            if key in seen:
-                continue
-            seen.add(key)
-            # detay bu pattern ile açılıyor
-            url_adv = f"https://www.ilan.gov.tr/ilan/kategori/9/ihale-duyurulari?adv={adv}&currentPage=0"
-            out.append({"title": f"İlan ({adv})", "url": url_adv})
+            seen.add(url_s)
+            out.append({"title": str(title).strip() if title else "İlan", "url": url_s})
+        else:
+            # string node
+            s = str(node)
+            if "/ilan/" in s:
+                # kaba yakalama: /ilan/..../
+                pass
 
     return out
 
 
-def pick_candidates_fallback(html: str, page: int) -> List[Dict[str, str]]:
+def pick_candidates_from_html(html: str, page: int) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     seen = set()
 
-    # A) /ilan/ href yakala
+    # /ilan/ href
     for lk in HREF_ILAN_RE.findall(html):
         url = "https://www.ilan.gov.tr" + lk if lk.startswith("/") else lk
         if url in seen:
@@ -267,10 +335,9 @@ def pick_candidates_fallback(html: str, page: int) -> List[Dict[str, str]]:
         seen.add(url)
         out.append({"title": "İlan", "url": url})
 
-    # B) adv= kodlarını yakala (asıl kritik)
+    # adv=
     advs = [a.upper() for a in ADV_RE.findall(html)]
-    # dedupe
-    for adv in list(dict.fromkeys(advs))[:500]:
+    for adv in list(dict.fromkeys(advs)):
         key = f"ADV::{adv}"
         if key in seen:
             continue
@@ -284,12 +351,10 @@ def pick_candidates_fallback(html: str, page: int) -> List[Dict[str, str]]:
 def extract_title_from_html(html: str) -> str:
     m = OG_TITLE_RE.search(html)
     if m:
-        return re.sub(r"\s+", " ", m.group(1)).strip()
+        return re.sub(r"\s+", " ", m.group(1)).strip()[:140]
     m = TITLE_RE.search(html)
     if m:
-        t = re.sub(r"\s+", " ", m.group(1)).strip()
-        # site title’ı uzunsa kısalt
-        return t[:140]
+        return re.sub(r"\s+", " ", m.group(1)).strip()[:140]
     return "İlan"
 
 
@@ -304,38 +369,53 @@ def html_to_text(html: str) -> str:
 def fetch_list_page(page: int) -> Tuple[List[Dict[str, str]], str]:
     url = LIST_URL_TEMPLATE.format(page=page)
     r = http_get(url)
+
     if r.status_code != 200:
         return [], f"LIST {page} HTTP {r.status_code}"
 
-    html = r.text
+    html = r.text or ""
 
+    # Koruma/boş sayfa tespiti
+    if detect_block_page(html):
+        return [], f"LIST {page} BLOCKED (protection page detected)"
+
+    # 1) __NEXT_DATA__ -> buildId -> JSON data route
     nd = extract_next_data(html)
     if nd:
-        cands = pick_candidates_from_next(nd)
-        if cands:
-            return cands, f"LIST {page} OK (next_data candidates={len(cands)})"
+        bid = next_data_build_id(nd)
+        if bid:
+            data_url = build_next_data_url(bid, page)
+            try:
+                j = http_get_json(data_url)
+                cands = pick_candidates_from_any_json(j, page)
+                if cands:
+                    return cands, f"LIST {page} OK (next_data_json candidates={len(cands)})"
+                else:
+                    return [], f"LIST {page} OK (next_data_json candidates=0)"
+            except Exception as e:
+                return [], f"LIST {page} next_data_json ERROR {type(e).__name__}"
 
-    # fallback: regex ile
-    cands = pick_candidates_fallback(html, page)
-    return cands, f"LIST {page} OK (fallback candidates={len(cands)})"
+    # 2) HTML fallback
+    cands = pick_candidates_from_html(html, page)
+    return cands, f"LIST {page} OK (html_fallback candidates={len(cands)})"
 
 
 def fetch_detail(url: str) -> Tuple[str, str, str]:
     r = http_get(url)
     if r.status_code != 200:
         return "", "İlan", f"DETAIL HTTP {r.status_code}"
-    html = r.text
+    html = r.text or ""
+    if detect_block_page(html):
+        return "", "İlan", "DETAIL BLOCKED"
     title = extract_title_from_html(html)
     text = html_to_text(html)
     return text, title, "DETAIL OK"
 
 
 def make_id(url: str) -> str:
-    # adv= varsa onu id yap
     m = ADV_RE.search(url)
     if m:
         return m.group(1).upper()
-    # /ilan/123 varsa onu id yap
     m = re.search(r"/ilan/(\d+)", url)
     if m:
         return m.group(1)
@@ -373,10 +453,15 @@ def main():
 
     for page in range(MAX_PAGES):
         cands, status = fetch_list_page(page)
-        list_candidates_total += len(cands)
         debug_lines.append(status)
+        list_candidates_total += len(cands)
 
-        # hızlıca “antalya sinyali” olan url/title üstte dursun
+        # aday yoksa sonraki sayfa
+        if not cands:
+            time.sleep(SLEEP_BETWEEN)
+            continue
+
+        # hızlı sıralama: Antalya kelimesi title/url’da geçenleri öne al
         def rank(c: Dict[str, str]) -> int:
             blob = norm_text(c.get("title", "") + " " + c.get("url", ""))
             return 1 if ("antalya" in blob or any(norm_text(t) in blob for t in ANTALYA_TOKENS)) else 0
@@ -415,7 +500,7 @@ def main():
                 if a_score < 3:
                     continue
 
-            # Kiralama + negatif temizliği
+            # Kiralama + negatif
             if not looks_like_kiralama(blob):
                 continue
 
@@ -450,7 +535,7 @@ def main():
             f"sent={sent}",
             "—",
         ]
-        tail = debug_lines[-14:] if len(debug_lines) > 14 else debug_lines
+        tail = debug_lines[-16:] if len(debug_lines) > 16 else debug_lines
         summary.extend([str(x)[:350] for x in tail])
         tg_broadcast(chat_ids, "\n".join(summary))
 
