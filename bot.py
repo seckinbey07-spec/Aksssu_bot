@@ -8,21 +8,16 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import requests
+import requests  # sadece Telegram için
+import urllib3
 
-# Cloudflare/WAF bypass için
-try:
-    import cloudscraper  # type: ignore
-except Exception:
-    cloudscraper = None
-
-# CA bundle için
 try:
     import certifi  # type: ignore
-    CERT_BUNDLE = certifi.where()
+    CA_BUNDLE = certifi.where()
 except Exception:
-    CERT_BUNDLE = None
+    CA_BUNDLE = None
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # -----------------------------
 # ENV
@@ -85,7 +80,6 @@ NEGATIVE_HINTS = [
 ]
 
 ALLOW_KIRAYA_VERME = True
-
 
 # -----------------------------
 # Regex
@@ -182,7 +176,7 @@ def walk_json(obj: Any) -> Iterable[Any]:
 
 
 # -----------------------------
-# Telegram
+# Telegram (requests ile)
 # -----------------------------
 def tg_send(chat_id: str, text: str) -> None:
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -200,66 +194,55 @@ def tg_broadcast(chat_ids: List[str], text: str) -> None:
 
 
 # -----------------------------
-# HTTP client
+# HTTP (ilan.gov.tr) - urllib3 ile iki mod
 # -----------------------------
-def make_session():
-    if cloudscraper is not None:
-        s = cloudscraper.create_scraper(
-            browser={"browser": "chrome", "platform": "windows", "desktop": True}
-        )
-    else:
-        s = requests.Session()
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
-    # Varsayılan doğrulamayı certifi ile zorla (varsa)
-    if CERT_BUNDLE:
-        try:
-            s.verify = CERT_BUNDLE  # type: ignore
-        except Exception:
-            pass
+HTTP_OK = urllib3.PoolManager(
+    cert_reqs="CERT_REQUIRED",
+    ca_certs=CA_BUNDLE,
+    timeout=urllib3.Timeout(total=REQUEST_TIMEOUT),
+    retries=False,
+)
 
-    return s
-
-
-SESSION = make_session()
+HTTP_INSECURE = urllib3.PoolManager(
+    cert_reqs="CERT_NONE",
+    assert_hostname=False,  # kritik: hostname check kapalı
+    timeout=urllib3.Timeout(total=REQUEST_TIMEOUT),
+    retries=False,
+)
 
 
-def http_get(url: str) -> requests.Response:
-    """
-    1) verify=certifi (veya default) ile dener
-    2) SSLError olursa verify=False ile tekrar dener (yalnızca ilan.gov.tr için)
-    """
+def u3_get(url: str, accept: str) -> Tuple[int, str]:
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": USER_AGENT,
+        "Accept": accept,
         "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.7,en;q=0.6",
         "Connection": "keep-alive",
     }
 
+    # 1) normal TLS
     try:
-        return SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-    except requests.exceptions.SSLError:
-        # fallback
-        return SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT, verify=False)
+        r = HTTP_OK.request("GET", url, headers=headers)
+        return int(r.status), (r.data.decode("utf-8", errors="ignore") if r.data else "")
+    except Exception:
+        # 2) insecure fallback
+        r = HTTP_INSECURE.request("GET", url, headers=headers)
+        return int(r.status), (r.data.decode("utf-8", errors="ignore") if r.data else "")
 
 
-def http_get_json(url: str) -> Any:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "application/json,text/plain,*/*",
-        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.7,en;q=0.6",
-        "Connection": "keep-alive",
-    }
+def u3_get_json(url: str) -> Tuple[int, Any]:
+    code, body = u3_get(url, "application/json,text/plain,*/*")
+    if code != 200:
+        return code, None
     try:
-        r = SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-    except requests.exceptions.SSLError:
-        r = SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT, verify=False)
-
-    r.raise_for_status()
-    return r.json()
+        return code, json.loads(body)
+    except Exception:
+        return code, None
 
 
 # -----------------------------
-# ilan.gov.tr parsing
+# Parsing
 # -----------------------------
 def extract_next_data(html: str) -> Optional[Dict[str, Any]]:
     m = NEXT_DATA_RE.search(html)
@@ -273,7 +256,7 @@ def extract_next_data(html: str) -> Optional[Dict[str, Any]]:
 
 
 def detect_block_page(html: str) -> bool:
-    t = norm_text(html[:6000])
+    t = norm_text(html[:8000])
     bad = ["cloudflare", "attention required", "access denied", "captcha", "verify you are human", "bot"]
     return any(x in t for x in bad)
 
@@ -296,17 +279,17 @@ def pick_candidates_from_any_json(j: Any, page: int) -> List[Dict[str, str]]:
     except Exception:
         dumped = str(j)
 
-    # adv= kodları
     advs = [a.upper() for a in ADV_RE.findall(dumped)]
     for adv in list(dict.fromkeys(advs)):
         key = f"ADV::{adv}"
         if key in seen:
             continue
         seen.add(key)
-        url_adv = f"https://www.ilan.gov.tr/ilan/kategori/9/ihale-duyurulari?adv={adv}&currentPage={page}"
-        out.append({"title": f"İlan ({adv})", "url": url_adv})
+        out.append({
+            "title": f"İlan ({adv})",
+            "url": f"https://www.ilan.gov.tr/ilan/kategori/9/ihale-duyurulari?adv={adv}&currentPage={page}"
+        })
 
-    # /ilan/ linkleri (varsa)
     for node in walk_json(j):
         if not isinstance(node, dict):
             continue
@@ -344,8 +327,10 @@ def pick_candidates_from_html(html: str, page: int) -> List[Dict[str, str]]:
         if key in seen:
             continue
         seen.add(key)
-        url_adv = f"https://www.ilan.gov.tr/ilan/kategori/9/ihale-duyurulari?adv={adv}&currentPage={page}"
-        out.append({"title": f"İlan ({adv})", "url": url_adv})
+        out.append({
+            "title": f"İlan ({adv})",
+            "url": f"https://www.ilan.gov.tr/ilan/kategori/9/ihale-duyurulari?adv={adv}&currentPage={page}"
+        })
 
     return out
 
@@ -370,12 +355,10 @@ def html_to_text(html: str) -> str:
 
 def fetch_list_page(page: int) -> Tuple[List[Dict[str, str]], str]:
     url = LIST_URL_TEMPLATE.format(page=page)
-    r = http_get(url)
+    code, html = u3_get(url, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+    if code != 200:
+        return [], f"LIST {page} HTTP {code}"
 
-    if r.status_code != 200:
-        return [], f"LIST {page} HTTP {r.status_code}"
-
-    html = r.text or ""
     if detect_block_page(html):
         return [], f"LIST {page} BLOCKED"
 
@@ -384,22 +367,20 @@ def fetch_list_page(page: int) -> Tuple[List[Dict[str, str]], str]:
         bid = next_data_build_id(nd)
         if bid:
             data_url = build_next_data_url(bid, page)
-            try:
-                j = http_get_json(data_url)
+            j_code, j = u3_get_json(data_url)
+            if j_code == 200 and j is not None:
                 cands = pick_candidates_from_any_json(j, page)
                 return cands, f"LIST {page} OK (next_data_json candidates={len(cands)})"
-            except Exception as e:
-                return [], f"LIST {page} next_data_json ERROR {type(e).__name__}"
+            return [], f"LIST {page} next_data_json HTTP {j_code}"
 
     cands = pick_candidates_from_html(html, page)
     return cands, f"LIST {page} OK (html candidates={len(cands)})"
 
 
 def fetch_detail(url: str) -> Tuple[str, str, str]:
-    r = http_get(url)
-    if r.status_code != 200:
-        return "", "İlan", f"DETAIL HTTP {r.status_code}"
-    html = r.text or ""
+    code, html = u3_get(url, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+    if code != 200:
+        return "", "İlan", f"DETAIL HTTP {code}"
     if detect_block_page(html):
         return "", "İlan", "DETAIL BLOCKED"
     title = extract_title_from_html(html)
@@ -418,8 +399,7 @@ def make_id(url: str) -> str:
 
 
 def format_msg(title: str, url: str) -> str:
-    title = title.strip() if title else "İlan"
-    return f"📌 {title}\n🔗 {url}"
+    return f"📌 {title.strip() if title else 'İlan'}\n🔗 {url}"
 
 
 # -----------------------------
@@ -442,7 +422,6 @@ def main():
     filtered = 0
     new_count = 0
     sent = 0
-
     debug_lines: List[str] = []
     hits: List[Tuple[str, str]] = []
 
@@ -476,7 +455,7 @@ def main():
             text, title, dstatus = fetch_detail(url)
             detail_checked += 1
 
-            if DEBUG and detail_checked <= 15:
+            if DEBUG and detail_checked <= 12:
                 debug_lines.append(f"{iid} {dstatus} title={title[:70]}")
 
             if not text:
@@ -536,7 +515,7 @@ def main():
         "detail_checked": detail_checked,
         "filtered": filtered,
         "new": new_count,
-        "sent": sent,
+        "sent": sent
     }, ensure_ascii=False))
 
 
