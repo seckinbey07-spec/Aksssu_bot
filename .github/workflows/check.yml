@@ -1,52 +1,36 @@
-name: Antalya İhale Bot Check
+name: Antalya İhale Bot
 
 on:
   schedule:
-    # Her 20 dakikada bir
     - cron: "*/20 * * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 jobs:
-  run-bot:
+  run:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Restore cache (seen)
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: .cache
-          key: antalya-ihale-seen-v1
-          restore-keys: |
-            antalya-ihale-seen-v1
+          key: antalya-ihale-cache
 
-      - name: Install deps
-        run: |
+      - run: |
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: Run bot
+      - run: python bot.py
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_IDS: ${{ secrets.CHAT_IDS }}
-          # DEBUG: "1"   # Debug açmak istersen burayı uncomment yap
-          # ILAN_API_URL: ${{ secrets.ILAN_API_URL }}  # endpointi secret olarak yönetmek istersen
           SEARCH_QUERY: "kiralama"
           MAX_PAGES: "6"
           PAGE_SIZE: "20"
           MAX_SEND_PER_RUN: "6"
-        run: |
-          python bot.py
-
-      - name: Save cache (seen)
-        uses: actions/cache@v4
-        with:
-          path: .cache
-          key: antalya-ihale-seen-v1
+          DEBUG: "1"
