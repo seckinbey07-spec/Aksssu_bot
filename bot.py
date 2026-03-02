@@ -6,7 +6,8 @@ import os
 import re
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+from xml.etree import ElementTree as ET
 
 import requests  # sadece Telegram için
 import urllib3
@@ -26,22 +27,23 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHAT_IDS_RAW = os.getenv("CHAT_IDS", "").strip()
 DEBUG = os.getenv("DEBUG", "0").strip() in ("1", "true", "TRUE", "yes", "YES", "on", "ON")
 
-LIST_URL_TEMPLATE = os.getenv(
-    "LIST_URL_TEMPLATE",
-    "https://www.ilan.gov.tr/ilan/kategori/9/ihale-duyurulari?currentPage={page}&ats=3"
-).strip()
-
-MAX_PAGES = int(os.getenv("MAX_PAGES", "6"))
 MAX_SEND_PER_RUN = int(os.getenv("MAX_SEND_PER_RUN", "6"))
+MAX_SITEMAP_URLS = int(os.getenv("MAX_SITEMAP_URLS", "250"))  # sitemap’ten en fazla bu kadar url incele
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "45"))
+SLEEP_BETWEEN = float(os.getenv("SLEEP_BETWEEN", "0.5"))
 
 CACHE_DIR = os.getenv("CACHE_DIR", ".cache")
 SEEN_FILE = os.path.join(CACHE_DIR, "seen.json")
 
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "45"))
-SLEEP_BETWEEN = float(os.getenv("SLEEP_BETWEEN", "0.6"))
+# Sitemap kaynakları (sırayla dener)
+SITEMAP_URLS = [
+    "https://www.ilan.gov.tr/sitemap/ads.xml",
+    "https://www.ilan.gov.tr/sitemap/daily-categories.xml",
+    "https://www.ilan.gov.tr/sitemap/categories.xml",
+]
 
 # -----------------------------
-# Antalya + Kiralama filtreleri
+# Filtreler
 # -----------------------------
 ANTALYA_TOKENS = [
     "antalya",
@@ -82,14 +84,10 @@ NEGATIVE_HINTS = [
 ALLOW_KIRAYA_VERME = True
 
 # -----------------------------
-# Regex
+# Regex / parse
 # -----------------------------
-NEXT_DATA_RE = re.compile(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.DOTALL | re.IGNORECASE)
-ADV_RE = re.compile(r"\badv=([A-Z]\d{6})\b", re.IGNORECASE)
-HREF_ILAN_RE = re.compile(r'href\s*=\s*[\'"]?(/ilan/[^\'"\s>]+)', re.IGNORECASE)
 TITLE_RE = re.compile(r"<title>(.*?)</title>", re.DOTALL | re.IGNORECASE)
 OG_TITLE_RE = re.compile(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\'](.*?)["\']', re.IGNORECASE)
-
 
 # -----------------------------
 # Helpers
@@ -164,19 +162,8 @@ def save_seen(seen: Dict[str, str]) -> None:
         json.dump(seen, f, ensure_ascii=False, indent=2)
 
 
-def walk_json(obj: Any) -> Iterable[Any]:
-    stack = [obj]
-    while stack:
-        cur = stack.pop()
-        yield cur
-        if isinstance(cur, dict):
-            stack.extend(cur.values())
-        elif isinstance(cur, list):
-            stack.extend(cur)
-
-
 # -----------------------------
-# Telegram (requests ile)
+# Telegram
 # -----------------------------
 def tg_send(chat_id: str, text: str) -> None:
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -194,7 +181,7 @@ def tg_broadcast(chat_ids: List[str], text: str) -> None:
 
 
 # -----------------------------
-# HTTP (ilan.gov.tr) - urllib3 ile iki mod
+# HTTP (ilan.gov.tr) - urllib3
 # -----------------------------
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
@@ -207,52 +194,25 @@ HTTP_OK = urllib3.PoolManager(
 
 HTTP_INSECURE = urllib3.PoolManager(
     cert_reqs="CERT_NONE",
-    assert_hostname=False,  # kritik: hostname check kapalı
+    assert_hostname=False,
     timeout=urllib3.Timeout(total=REQUEST_TIMEOUT),
     retries=False,
 )
 
 
-def u3_get(url: str, accept: str) -> Tuple[int, str]:
+def u3_get(url: str, accept: str) -> Tuple[int, bytes]:
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": accept,
         "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.7,en;q=0.6",
         "Connection": "keep-alive",
     }
-
-    # 1) normal TLS
     try:
         r = HTTP_OK.request("GET", url, headers=headers)
-        return int(r.status), (r.data.decode("utf-8", errors="ignore") if r.data else "")
+        return int(r.status), (r.data or b"")
     except Exception:
-        # 2) insecure fallback
         r = HTTP_INSECURE.request("GET", url, headers=headers)
-        return int(r.status), (r.data.decode("utf-8", errors="ignore") if r.data else "")
-
-
-def u3_get_json(url: str) -> Tuple[int, Any]:
-    code, body = u3_get(url, "application/json,text/plain,*/*")
-    if code != 200:
-        return code, None
-    try:
-        return code, json.loads(body)
-    except Exception:
-        return code, None
-
-
-# -----------------------------
-# Parsing
-# -----------------------------
-def extract_next_data(html: str) -> Optional[Dict[str, Any]]:
-    m = NEXT_DATA_RE.search(html)
-    if not m:
-        return None
-    raw = m.group(1).strip()
-    try:
-        return json.loads(raw)
-    except Exception:
-        return None
+        return int(r.status), (r.data or b"")
 
 
 def detect_block_page(html: str) -> bool:
@@ -261,80 +221,84 @@ def detect_block_page(html: str) -> bool:
     return any(x in t for x in bad)
 
 
-def next_data_build_id(next_data: Dict[str, Any]) -> Optional[str]:
-    bid = next_data.get("buildId")
-    return bid.strip() if isinstance(bid, str) and bid.strip() else None
-
-
-def build_next_data_url(build_id: str, page: int) -> str:
-    return f"https://www.ilan.gov.tr/_next/data/{build_id}/ilan/kategori/9/ihale-duyurulari.json?currentPage={page}&ats=3"
-
-
-def pick_candidates_from_any_json(j: Any, page: int) -> List[Dict[str, str]]:
-    out: List[Dict[str, str]] = []
-    seen = set()
-
+# -----------------------------
+# Sitemap parsing
+# -----------------------------
+def parse_sitemap_xml(xml_bytes: bytes) -> Tuple[List[str], str]:
+    """
+    Returns (loc_list, kind)
+    kind: "urlset" or "sitemapindex" or "unknown"
+    """
     try:
-        dumped = json.dumps(j, ensure_ascii=False)
+        root = ET.fromstring(xml_bytes)
     except Exception:
-        dumped = str(j)
+        return [], "parse_error"
 
-    advs = [a.upper() for a in ADV_RE.findall(dumped)]
-    for adv in list(dict.fromkeys(advs)):
-        key = f"ADV::{adv}"
-        if key in seen:
+    tag = root.tag.lower()
+    if "urlset" in tag:
+        locs = []
+        for url_el in root.findall(".//{*}url"):
+            loc = url_el.find("{*}loc")
+            if loc is not None and loc.text:
+                locs.append(loc.text.strip())
+        return locs, "urlset"
+
+    if "sitemapindex" in tag:
+        locs = []
+        for sm_el in root.findall(".//{*}sitemap"):
+            loc = sm_el.find("{*}loc")
+            if loc is not None and loc.text:
+                locs.append(loc.text.strip())
+        return locs, "sitemapindex"
+
+    return [], "unknown"
+
+
+def fetch_sitemap_urls(debug_lines: List[str]) -> List[str]:
+    """
+    1) SITEMAP_URLS içinden ilk erişilebilen sitemap’i alır
+    2) sitemapindex ise içindeki ilk birkaç sitemap’i çekip URL’leri toplar
+    """
+    all_urls: List[str] = []
+
+    for sm in SITEMAP_URLS:
+        code, data = u3_get(sm, "application/xml,text/xml,*/*")
+        if code != 200 or not data:
+            debug_lines.append(f"SITEMAP {sm} HTTP {code}")
             continue
-        seen.add(key)
-        out.append({
-            "title": f"İlan ({adv})",
-            "url": f"https://www.ilan.gov.tr/ilan/kategori/9/ihale-duyurulari?adv={adv}&currentPage={page}"
-        })
 
-    for node in walk_json(j):
-        if not isinstance(node, dict):
-            continue
-        url = node.get("url") or node.get("link") or node.get("path") or node.get("href")
-        title = node.get("title") or node.get("name") or node.get("baslik")
-        if not url:
-            continue
-        url_s = str(url).strip()
-        if "/ilan/" not in url_s:
-            continue
-        if url_s.startswith("/"):
-            url_s = "https://www.ilan.gov.tr" + url_s
-        if url_s in seen:
-            continue
-        seen.add(url_s)
-        out.append({"title": str(title).strip() if title else "İlan", "url": url_s})
+        locs, kind = parse_sitemap_xml(data)
+        debug_lines.append(f"SITEMAP {sm} OK kind={kind} locs={len(locs)}")
 
-    return out
+        if kind == "urlset":
+            all_urls.extend(locs)
+            break
 
+        if kind == "sitemapindex":
+            # index içinden ilk 6 alt sitemap’i dene (çok büyüyebilir)
+            submaps = locs[:6]
+            for sub in submaps:
+                c2, d2 = u3_get(sub, "application/xml,text/xml,*/*")
+                if c2 != 200 or not d2:
+                    debug_lines.append(f"SUBMAP {sub} HTTP {c2}")
+                    continue
+                u2, k2 = parse_sitemap_xml(d2)
+                debug_lines.append(f"SUBMAP {sub} OK kind={k2} locs={len(u2)}")
+                if k2 == "urlset":
+                    all_urls.extend(u2)
+                # limit
+                if len(all_urls) >= MAX_SITEMAP_URLS:
+                    break
+            break
 
-def pick_candidates_from_html(html: str, page: int) -> List[Dict[str, str]]:
-    out: List[Dict[str, str]] = []
-    seen = set()
-
-    for lk in HREF_ILAN_RE.findall(html):
-        url = "https://www.ilan.gov.tr" + lk if lk.startswith("/") else lk
-        if url in seen:
-            continue
-        seen.add(url)
-        out.append({"title": "İlan", "url": url})
-
-    advs = [a.upper() for a in ADV_RE.findall(html)]
-    for adv in list(dict.fromkeys(advs)):
-        key = f"ADV::{adv}"
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append({
-            "title": f"İlan ({adv})",
-            "url": f"https://www.ilan.gov.tr/ilan/kategori/9/ihale-duyurulari?adv={adv}&currentPage={page}"
-        })
-
-    return out
+    # Deduplicate + limit
+    dedup = list(dict.fromkeys(all_urls))
+    return dedup[:MAX_SITEMAP_URLS]
 
 
+# -----------------------------
+# Detail fetch + filter
+# -----------------------------
 def extract_title_from_html(html: str) -> str:
     m = OG_TITLE_RE.search(html)
     if m:
@@ -353,49 +317,24 @@ def html_to_text(html: str) -> str:
     return html
 
 
-def fetch_list_page(page: int) -> Tuple[List[Dict[str, str]], str]:
-    url = LIST_URL_TEMPLATE.format(page=page)
-    code, html = u3_get(url, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-    if code != 200:
-        return [], f"LIST {page} HTTP {code}"
-
-    if detect_block_page(html):
-        return [], f"LIST {page} BLOCKED"
-
-    nd = extract_next_data(html)
-    if nd:
-        bid = next_data_build_id(nd)
-        if bid:
-            data_url = build_next_data_url(bid, page)
-            j_code, j = u3_get_json(data_url)
-            if j_code == 200 and j is not None:
-                cands = pick_candidates_from_any_json(j, page)
-                return cands, f"LIST {page} OK (next_data_json candidates={len(cands)})"
-            return [], f"LIST {page} next_data_json HTTP {j_code}"
-
-    cands = pick_candidates_from_html(html, page)
-    return cands, f"LIST {page} OK (html candidates={len(cands)})"
+def make_id(url: str) -> str:
+    # /ilan/2021740/ gibi
+    m = re.search(r"/ilan/(\d+)", url)
+    if m:
+        return m.group(1)
+    return url
 
 
 def fetch_detail(url: str) -> Tuple[str, str, str]:
-    code, html = u3_get(url, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+    code, data = u3_get(url, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
     if code != 200:
         return "", "İlan", f"DETAIL HTTP {code}"
+    html = data.decode("utf-8", errors="ignore")
     if detect_block_page(html):
         return "", "İlan", "DETAIL BLOCKED"
     title = extract_title_from_html(html)
     text = html_to_text(html)
     return text, title, "DETAIL OK"
-
-
-def make_id(url: str) -> str:
-    m = ADV_RE.search(url)
-    if m:
-        return m.group(1).upper()
-    m = re.search(r"/ilan/(\d+)", url)
-    if m:
-        return m.group(1)
-    return url
 
 
 def format_msg(title: str, url: str) -> str:
@@ -417,72 +356,54 @@ def main():
 
     seen = load_seen()
 
-    list_candidates_total = 0
+    debug_lines: List[str] = []
+    urls = fetch_sitemap_urls(debug_lines)
+
+    sitemap_total = len(urls)
     detail_checked = 0
     filtered = 0
     new_count = 0
     sent = 0
-    debug_lines: List[str] = []
+
     hits: List[Tuple[str, str]] = []
 
-    for page in range(MAX_PAGES):
-        cands, status = fetch_list_page(page)
-        debug_lines.append(status)
-        list_candidates_total += len(cands)
+    # Sadece ilan detaylarını hedefle (sitemap bazen kategori sayfalarını da döndürebilir)
+    urls = [u for u in urls if "/ilan/" in u]
 
-        if not cands:
-            time.sleep(SLEEP_BETWEEN)
-            continue
-
-        def rank(c: Dict[str, str]) -> int:
-            blob = norm_text(c.get("title", "") + " " + c.get("url", ""))
-            return 1 if ("antalya" in blob or any(norm_text(t) in blob for t in ANTALYA_TOKENS)) else 0
-
-        cands.sort(key=rank, reverse=True)
-
-        for c in cands:
-            if len(hits) >= MAX_SEND_PER_RUN:
-                break
-
-            url = c.get("url", "")
-            if not url:
-                continue
-
-            iid = make_id(url)
-            if iid in seen:
-                continue
-
-            text, title, dstatus = fetch_detail(url)
-            detail_checked += 1
-
-            if DEBUG and detail_checked <= 12:
-                debug_lines.append(f"{iid} {dstatus} title={title[:70]}")
-
-            if not text:
-                continue
-
-            blob = f"{title} {text}"
-
-            a_score = antalya_score(blob)
-            if "antalya" not in norm_text(blob):
-                if a_score < 4:
-                    continue
-            else:
-                if a_score < 3:
-                    continue
-
-            if not looks_like_kiralama(blob):
-                continue
-
-            filtered += 1
-            seen[iid] = now_iso()
-            hits.append((title, url))
-            new_count += 1
-
-            time.sleep(SLEEP_BETWEEN)
-
+    for url in urls:
         if len(hits) >= MAX_SEND_PER_RUN:
             break
+
+        iid = make_id(url)
+        if iid in seen:
+            continue
+
+        text, title, st = fetch_detail(url)
+        detail_checked += 1
+
+        if DEBUG and detail_checked <= 12:
+            debug_lines.append(f"{iid} {st} title={title[:70]}")
+
+        if not text:
+            continue
+
+        blob = f"{title} {text}"
+
+        a_score = antalya_score(blob)
+        if "antalya" not in norm_text(blob):
+            if a_score < 4:
+                continue
+        else:
+            if a_score < 3:
+                continue
+
+        if not looks_like_kiralama(blob):
+            continue
+
+        filtered += 1
+        seen[iid] = now_iso()
+        hits.append((title, url))
+        new_count += 1
 
         time.sleep(SLEEP_BETWEEN)
 
@@ -495,27 +416,28 @@ def main():
 
     if DEBUG:
         summary = [
-            "🧪 DEBUG antalya_ihale_bot",
+            "🧪 DEBUG antalya_ihale_bot (sitemap mode)",
             f"time={now_iso()}",
-            f"list_pages={MAX_PAGES}",
-            f"list_candidates_total={list_candidates_total}",
+            f"sitemap_urls_total={sitemap_total}",
+            f"sitemap_ilan_urls={len(urls)}",
             f"detail_checked={detail_checked}",
             f"filtre_sonrasi={filtered}",
             f"yeni={new_count}",
             f"sent={sent}",
             "—",
         ]
-        tail = debug_lines[-16:] if len(debug_lines) > 16 else debug_lines
+        tail = debug_lines[-18:] if len(debug_lines) > 18 else debug_lines
         summary.extend([str(x)[:350] for x in tail])
         tg_broadcast(chat_ids, "\n".join(summary))
 
     print(json.dumps({
         "time": now_iso(),
-        "list_candidates_total": list_candidates_total,
+        "sitemap_urls_total": sitemap_total,
+        "sitemap_ilan_urls": len(urls),
         "detail_checked": detail_checked,
         "filtered": filtered,
         "new": new_count,
-        "sent": sent
+        "sent": sent,
     }, ensure_ascii=False))
 
 
