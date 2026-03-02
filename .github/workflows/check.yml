@@ -2,7 +2,7 @@ name: Antalya İhale Bot
 
 on:
   schedule:
-    - cron: "*/20 * * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch: {}
 
 jobs:
@@ -21,9 +21,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache
-          key: antalya-ihale-seen-v6
+          key: antalya-ihale-seen-v7
           restore-keys: |
-            antalya-ihale-seen-v6
+            antalya-ihale-seen-v7
 
       - name: Install deps
         run: |
@@ -35,7 +35,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_IDS: ${{ secrets.CHAT_IDS }}
           DEBUG: "1"
-          MAX_PAGES: "6"
           MAX_SEND_PER_RUN: "6"
+          MAX_SITEMAP_URLS: "250"
         run: |
           python bot.py
