@@ -10,11 +10,18 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
-# cloudscraper (Cloudflare/WAF bypass için)
+# Cloudflare/WAF bypass için
 try:
     import cloudscraper  # type: ignore
 except Exception:
     cloudscraper = None
+
+# CA bundle için
+try:
+    import certifi  # type: ignore
+    CERT_BUNDLE = certifi.where()
+except Exception:
+    CERT_BUNDLE = None
 
 
 # -----------------------------
@@ -77,7 +84,8 @@ NEGATIVE_HINTS = [
     "ipotek",
 ]
 
-ALLOW_KIRAYA_VERME = True  # istemiyorsan False yap
+ALLOW_KIRAYA_VERME = True
+
 
 # -----------------------------
 # Regex
@@ -192,28 +200,46 @@ def tg_broadcast(chat_ids: List[str], text: str) -> None:
 
 
 # -----------------------------
-# HTTP client (cloudscraper + session)
+# HTTP client
 # -----------------------------
 def make_session():
     if cloudscraper is not None:
         s = cloudscraper.create_scraper(
             browser={"browser": "chrome", "platform": "windows", "desktop": True}
         )
-        return s
-    return requests.Session()
+    else:
+        s = requests.Session()
+
+    # Varsayılan doğrulamayı certifi ile zorla (varsa)
+    if CERT_BUNDLE:
+        try:
+            s.verify = CERT_BUNDLE  # type: ignore
+        except Exception:
+            pass
+
+    return s
 
 
 SESSION = make_session()
 
 
 def http_get(url: str) -> requests.Response:
+    """
+    1) verify=certifi (veya default) ile dener
+    2) SSLError olursa verify=False ile tekrar dener (yalnızca ilan.gov.tr için)
+    """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.7,en;q=0.6",
         "Connection": "keep-alive",
     }
-    return SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+
+    try:
+        return SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+    except requests.exceptions.SSLError:
+        # fallback
+        return SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT, verify=False)
 
 
 def http_get_json(url: str) -> Any:
@@ -223,7 +249,11 @@ def http_get_json(url: str) -> Any:
         "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.7,en;q=0.6",
         "Connection": "keep-alive",
     }
-    r = SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+    try:
+        r = SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+    except requests.exceptions.SSLError:
+        r = SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT, verify=False)
+
     r.raise_for_status()
     return r.json()
 
@@ -243,49 +273,30 @@ def extract_next_data(html: str) -> Optional[Dict[str, Any]]:
 
 
 def detect_block_page(html: str) -> bool:
-    t = norm_text(html[:5000])
-    # Cloudflare / bot protection / access denied sinyalleri
-    bad_markers = [
-        "cloudflare",
-        "attention required",
-        "access denied",
-        "captcha",
-        "bot detection",
-        "verify you are human",
-    ]
-    return any(m in t for m in bad_markers)
+    t = norm_text(html[:6000])
+    bad = ["cloudflare", "attention required", "access denied", "captcha", "verify you are human", "bot"]
+    return any(x in t for x in bad)
 
 
 def next_data_build_id(next_data: Dict[str, Any]) -> Optional[str]:
     bid = next_data.get("buildId")
-    if isinstance(bid, str) and bid.strip():
-        return bid.strip()
-    return None
+    return bid.strip() if isinstance(bid, str) and bid.strip() else None
 
 
 def build_next_data_url(build_id: str, page: int) -> str:
-    # Next.js data route: /_next/data/<buildId>/ilan/kategori/9/ihale-duyurulari.json?currentPage=0&ats=3
     return f"https://www.ilan.gov.tr/_next/data/{build_id}/ilan/kategori/9/ihale-duyurulari.json?currentPage={page}&ats=3"
 
 
 def pick_candidates_from_any_json(j: Any, page: int) -> List[Dict[str, str]]:
-    """
-    JSON içinde:
-      - /ilan/ linkleri
-      - adv=Mxxxxxx kodları
-    arar ve URL üretir.
-    """
     out: List[Dict[str, str]] = []
     seen = set()
 
-    # JSON dump üzerinden adv yakalama (en sağlam)
-    dumped = ""
     try:
         dumped = json.dumps(j, ensure_ascii=False)
     except Exception:
         dumped = str(j)
 
-    # adv kodları
+    # adv= kodları
     advs = [a.upper() for a in ADV_RE.findall(dumped)]
     for adv in list(dict.fromkeys(advs)):
         key = f"ADV::{adv}"
@@ -297,28 +308,21 @@ def pick_candidates_from_any_json(j: Any, page: int) -> List[Dict[str, str]]:
 
     # /ilan/ linkleri (varsa)
     for node in walk_json(j):
-        if not isinstance(node, (dict, str)):
+        if not isinstance(node, dict):
             continue
-        if isinstance(node, dict):
-            url = node.get("url") or node.get("link") or node.get("path") or node.get("href")
-            title = node.get("title") or node.get("name") or node.get("baslik")
-            if not url:
-                continue
-            url_s = str(url).strip()
-            if "/ilan/" not in url_s:
-                continue
-            if url_s.startswith("/"):
-                url_s = "https://www.ilan.gov.tr" + url_s
-            if url_s in seen:
-                continue
-            seen.add(url_s)
-            out.append({"title": str(title).strip() if title else "İlan", "url": url_s})
-        else:
-            # string node
-            s = str(node)
-            if "/ilan/" in s:
-                # kaba yakalama: /ilan/..../
-                pass
+        url = node.get("url") or node.get("link") or node.get("path") or node.get("href")
+        title = node.get("title") or node.get("name") or node.get("baslik")
+        if not url:
+            continue
+        url_s = str(url).strip()
+        if "/ilan/" not in url_s:
+            continue
+        if url_s.startswith("/"):
+            url_s = "https://www.ilan.gov.tr" + url_s
+        if url_s in seen:
+            continue
+        seen.add(url_s)
+        out.append({"title": str(title).strip() if title else "İlan", "url": url_s})
 
     return out
 
@@ -327,7 +331,6 @@ def pick_candidates_from_html(html: str, page: int) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     seen = set()
 
-    # /ilan/ href
     for lk in HREF_ILAN_RE.findall(html):
         url = "https://www.ilan.gov.tr" + lk if lk.startswith("/") else lk
         if url in seen:
@@ -335,7 +338,6 @@ def pick_candidates_from_html(html: str, page: int) -> List[Dict[str, str]]:
         seen.add(url)
         out.append({"title": "İlan", "url": url})
 
-    # adv=
     advs = [a.upper() for a in ADV_RE.findall(html)]
     for adv in list(dict.fromkeys(advs)):
         key = f"ADV::{adv}"
@@ -374,12 +376,9 @@ def fetch_list_page(page: int) -> Tuple[List[Dict[str, str]], str]:
         return [], f"LIST {page} HTTP {r.status_code}"
 
     html = r.text or ""
-
-    # Koruma/boş sayfa tespiti
     if detect_block_page(html):
-        return [], f"LIST {page} BLOCKED (protection page detected)"
+        return [], f"LIST {page} BLOCKED"
 
-    # 1) __NEXT_DATA__ -> buildId -> JSON data route
     nd = extract_next_data(html)
     if nd:
         bid = next_data_build_id(nd)
@@ -388,16 +387,12 @@ def fetch_list_page(page: int) -> Tuple[List[Dict[str, str]], str]:
             try:
                 j = http_get_json(data_url)
                 cands = pick_candidates_from_any_json(j, page)
-                if cands:
-                    return cands, f"LIST {page} OK (next_data_json candidates={len(cands)})"
-                else:
-                    return [], f"LIST {page} OK (next_data_json candidates=0)"
+                return cands, f"LIST {page} OK (next_data_json candidates={len(cands)})"
             except Exception as e:
                 return [], f"LIST {page} next_data_json ERROR {type(e).__name__}"
 
-    # 2) HTML fallback
     cands = pick_candidates_from_html(html, page)
-    return cands, f"LIST {page} OK (html_fallback candidates={len(cands)})"
+    return cands, f"LIST {page} OK (html candidates={len(cands)})"
 
 
 def fetch_detail(url: str) -> Tuple[str, str, str]:
@@ -456,12 +451,10 @@ def main():
         debug_lines.append(status)
         list_candidates_total += len(cands)
 
-        # aday yoksa sonraki sayfa
         if not cands:
             time.sleep(SLEEP_BETWEEN)
             continue
 
-        # hızlı sıralama: Antalya kelimesi title/url’da geçenleri öne al
         def rank(c: Dict[str, str]) -> int:
             blob = norm_text(c.get("title", "") + " " + c.get("url", ""))
             return 1 if ("antalya" in blob or any(norm_text(t) in blob for t in ANTALYA_TOKENS)) else 0
@@ -491,16 +484,14 @@ def main():
 
             blob = f"{title} {text}"
 
-            # Antalya filtresi
             a_score = antalya_score(blob)
             if "antalya" not in norm_text(blob):
-                if a_score < 4:  # antalya yoksa en az 2 ilçe
+                if a_score < 4:
                     continue
             else:
                 if a_score < 3:
                     continue
 
-            # Kiralama + negatif
             if not looks_like_kiralama(blob):
                 continue
 
