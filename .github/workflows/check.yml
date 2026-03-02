@@ -1,55 +1,52 @@
-name: Ihale Checker
+name: Antalya İhale Bot Check
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
-  workflow_dispatch:
-
-permissions:
-  contents: write
-
-concurrency:
-  group: ihale-checker
-  cancel-in-progress: true
+    # Her 20 dakikada bir
+    - cron: "*/20 * * * *"
+  workflow_dispatch: {}
 
 jobs:
-  run-check:
+  run-bot:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Restore cache (seen)
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: antalya-ihale-seen-v1
+          restore-keys: |
+            antalya-ihale-seen-v1
+
+      - name: Install deps
         run: |
-          pip install requests beautifulsoup4 urllib3
+          python -m pip install --upgrade pip
+          pip install requests
 
       - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_IDS: ${{ secrets.CHAT_IDS }}
-
-          DEBUG: "1"
-          INIT_SILENT: "0"
-
-          ILAN_ENABLED: "1"
-          ILAN_SEARCH_TEXT: "antalya kiralama"
-          ILAN_PAGE_SIZE: "50"
+          # DEBUG: "1"   # Debug açmak istersen burayı uncomment yap
+          # ILAN_API_URL: ${{ secrets.ILAN_API_URL }}  # endpointi secret olarak yönetmek istersen
+          SEARCH_QUERY: "kiralama"
+          MAX_PAGES: "6"
+          PAGE_SIZE: "20"
+          MAX_SEND_PER_RUN: "6"
         run: |
           python bot.py
 
-      - name: Write last run timestamp
-        run: |
-          date -u +"%Y-%m-%d %H:%M:%S UTC" > last_run.txt
-
-      - name: Commit state and last_run if changed
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add state.json last_run.txt || true
-          git commit -m "Update state / last_run" || echo "No changes"
-          git push || echo "No push needed"
+      - name: Save cache (seen)
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: antalya-ihale-seen-v1
