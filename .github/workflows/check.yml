@@ -21,9 +21,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache
-          key: antalya-ihale-seen-v2
+          key: antalya-ihale-seen-v3
           restore-keys: |
-            antalya-ihale-seen-v2
+            antalya-ihale-seen-v3
 
       - name: Install deps
         run: |
@@ -37,7 +37,6 @@ jobs:
           DEBUG: "1"
           MAX_PAGES: "6"
           MAX_SEND_PER_RUN: "6"
-          # Liste URL’ini istersen buradan değiştirirsin:
           # LIST_URL_TEMPLATE: "https://www.ilan.gov.tr/ilan/kategori/9/ihale-duyurulari?currentPage={page}&ats=3"
         run: |
           python bot.py
