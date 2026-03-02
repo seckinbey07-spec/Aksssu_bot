@@ -3,34 +3,41 @@ name: Antalya İhale Bot
 on:
   schedule:
     - cron: "*/20 * * * *"
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 jobs:
   run:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - uses: actions/cache@v4
+      - name: Restore cache (seen)
+        uses: actions/cache@v4
         with:
           path: .cache
-          key: antalya-ihale-cache
+          key: antalya-ihale-seen-v2
+          restore-keys: |
+            antalya-ihale-seen-v2
 
-      - run: |
+      - name: Install deps
+        run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install requests urllib3
 
-      - run: python bot.py
+      - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_IDS: ${{ secrets.CHAT_IDS }}
-          SEARCH_QUERY: "kiralama"
-          MAX_PAGES: "6"
-          PAGE_SIZE: "20"
-          MAX_SEND_PER_RUN: "6"
           DEBUG: "1"
+          MAX_PAGES: "6"
+          MAX_SEND_PER_RUN: "6"
+          # Liste URL’ini istersen buradan değiştirirsin:
+          # LIST_URL_TEMPLATE: "https://www.ilan.gov.tr/ilan/kategori/9/ihale-duyurulari?currentPage={page}&ats=3"
+        run: |
+          python bot.py
