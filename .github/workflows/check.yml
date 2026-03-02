@@ -21,14 +21,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache
-          key: antalya-ihale-seen-v3
+          key: antalya-ihale-seen-v4
           restore-keys: |
-            antalya-ihale-seen-v3
+            antalya-ihale-seen-v4
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install requests urllib3
+          pip install requests urllib3 cloudscraper
 
       - name: Run bot
         env:
