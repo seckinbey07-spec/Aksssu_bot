@@ -1,6 +1,9 @@
 {
   "last_hash": "d1afd512e6155283656d18667198424d5815b3599edf4a41322491940a620128",
-  "aksu_seen_urls": [],
+  "aksu_seen_urls": [
+    "https://www.aksu.bel.tr/ihale/antalya-aksu-belediye-baskanligindan-ilan-lokal-sosyal-tesis-kiralama-isi",
+    "https://www.aksu.bel.tr/ihaleler"
+  ],
   "ilan_seen_ids": [
     "2024802",
     "2032113",
