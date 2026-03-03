@@ -40,6 +40,7 @@ EXCLUDE_WORDS = [
     "mahkeme",
     "icra",
     "mühlet",
+    "kordato",
 ]
 
 REQUIRE_IHALE_IN_URL = os.getenv("REQUIRE_IHALE_IN_URL", "1") == "1"
@@ -50,7 +51,6 @@ def send_telegram(text: str) -> None:
         raise RuntimeError("BOT_TOKEN eksik.")
     if not CHAT_ID_LIST:
         raise RuntimeError("CHAT_IDS eksik. Örn: 8714272187 veya -100(grup_id)")
-
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     for chat_id in CHAT_ID_LIST:
         r = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=30)
@@ -82,17 +82,33 @@ def _post_ads_by_filter(payload: dict) -> dict:
         timeout=45,
         verify=False,  # GitHub Actions SSL fix
     )
-    # Yanıt JSON değilse burada patlar; debug için yakalayacağız
+    r.raise_for_status()
     return r.json()
 
 
-def ilan_fetch_page(skip_count: int) -> tuple[list[dict], str]:
+def _parse_ads(data: dict) -> list[dict]:
+    ads = (data.get("result") or {}).get("ads") or []
+    out = []
+    for ad in ads:
+        ad_id = str(ad.get("id"))
+        title = (ad.get("title") or "").strip()
+        url_str = (ad.get("urlStr") or "").strip()
+        out.append(
+            {
+                "id": ad_id,
+                "title": title,
+                "url_str": url_str,
+                "url": ILAN_BASE_URL + url_str if url_str else ILAN_BASE_URL,
+            }
+        )
+    return out
+
+
+def ilan_fetch_page_best_variant(skip_count: int, forced_variant: str | None) -> tuple[list[dict], str, dict]:
     """
-    3 payload varyantı dener:
-      v1: aci list
-      v2: aci int
-      v3: aci yok (fallback)
-    Başarılı olan varyant adını döndürür.
+    - forced_variant verildiyse sadece onu dener.
+    - yoksa 3 varyantı dener, en çok sonuç döndüreni seçer.
+    Dönen: items, chosen_variant, counts_debug
     """
     base = {
         "skipCount": skip_count,
@@ -105,48 +121,73 @@ def ilan_fetch_page(skip_count: int) -> tuple[list[dict], str]:
         ("v3_no_aci", {"keys": {"q": [ILAN_SEARCH_TEXT]}}),
     ]
 
-    last_err = None
+    if forced_variant:
+        variants = [v for v in variants if v[0] == forced_variant]
+
+    best_name = "none"
+    best_items: list[dict] = []
+    counts = {}
 
     for name, extra in variants:
         payload = {**base, **extra}
         try:
             data = _post_ads_by_filter(payload)
-            ads = (data.get("result") or {}).get("ads") or []
-            out = []
-            for ad in ads:
-                ad_id = str(ad.get("id"))
-                title = (ad.get("title") or "").strip()
-                url_str = (ad.get("urlStr") or "").strip()
-                out.append(
-                    {
-                        "id": ad_id,
-                        "title": title,
-                        "url_str": url_str,
-                        "url": ILAN_BASE_URL + url_str if url_str else ILAN_BASE_URL,
-                    }
-                )
-            return out, name
+            items = _parse_ads(data)
+            counts[name] = len(items)
+
+            if len(items) > len(best_items):
+                best_items = items
+                best_name = name
         except Exception as e:
-            last_err = f"{type(e).__name__}: {e}"
+            counts[name] = f"ERR:{type(e).__name__}"
+            continue
 
-    # Üçü de patlarsa
-    if DEBUG_ENABLED and last_err:
-        send_telegram(f"DEBUG API ERROR: {last_err}")
-    return [], "none_failed"
+    return best_items, best_name, counts
 
 
-def ilan_collect() -> tuple[list[dict], int, str]:
-    all_items: list[dict] = []
+def is_relevant(it: dict) -> bool:
+    t = (it.get("title") or "").lower()
+    u = (it.get("url_str") or "").lower()
+    combined = f"{t} {u}"
+
+    # Antalya (aci çalışmasa bile)
+    if TARGET_CITY_TEXT and TARGET_CITY_TEXT not in combined:
+        return False
+
+    # kiralama
+    if "kiralama" not in combined:
+        return False
+
+    # ihale sinyali: urlStr veya title içinde ihale olsun
+    if REQUIRE_IHALE_IN_URL:
+        if "ihale" not in u and "ihale" not in t:
+            return False
+
+    # alakasızlar
+    if any(w in combined for w in EXCLUDE_WORDS):
+        return False
+
+    return True
+
+
+def ilan_collect() -> tuple[list[dict], int, str, dict]:
+    """
+    İlk sayfada en iyi varyantı seçer, sonra aynı varyantla sayfalar.
+    """
     raw_total = 0
-    used_variant = "unknown"
+    chosen_variant = None
+    first_page_counts = {}
+
+    all_items: list[dict] = []
 
     for page_idx in range(ILAN_MAX_PAGES):
         skip = page_idx * ILAN_PAGE_SIZE
-        items, variant = ilan_fetch_page(skip)
 
-        # İlk sayfada hangi varyant çalıştıysa onu raporlayalım
         if page_idx == 0:
-            used_variant = variant
+            items, chosen_variant, counts = ilan_fetch_page_best_variant(skip, forced_variant=None)
+            first_page_counts = counts
+        else:
+            items, _, _ = ilan_fetch_page_best_variant(skip, forced_variant=chosen_variant)
 
         raw_total += len(items)
         all_items.extend(items)
@@ -156,38 +197,13 @@ def ilan_collect() -> tuple[list[dict], int, str]:
 
         time.sleep(0.3)
 
-    # Filtreleme
-    filtered = []
-    for it in all_items:
-        t = (it.get("title") or "").lower()
-        u = (it.get("url_str") or "").lower()
-        combined = f"{t} {u}"
-
-        # Kiralama
-        if "kiralama" not in combined:
-            continue
-
-        # Antalya (aci çalışmasa bile fallback)
-        if TARGET_CITY_TEXT and TARGET_CITY_TEXT not in combined:
-            continue
-
-        # İhale sinyali
-        if REQUIRE_IHALE_IN_URL and "ihale" not in u:
-            continue
-
-        # Alakasızlar
-        if any(w in combined for w in EXCLUDE_WORDS):
-            continue
-
-        filtered.append(it)
-
-    # Tekilleştir
+    # filtre + tekilleştir
+    filtered = [x for x in all_items if x.get("id") and is_relevant(x)]
     uniq = {}
-    for it in filtered:
-        if it.get("id"):
-            uniq[it["id"]] = it
+    for x in filtered:
+        uniq[x["id"]] = x
 
-    return list(uniq.values()), raw_total, used_variant
+    return list(uniq.values()), raw_total, (chosen_variant or "none"), first_page_counts
 
 
 def main() -> None:
@@ -199,7 +215,7 @@ def main() -> None:
     state = load_state()
     seen = set(state.get("ilan_seen_ids", []))
 
-    items, raw_total, variant = ilan_collect()
+    items, raw_total, variant, counts = ilan_collect()
     new_items = [x for x in items if x["id"] not in seen]
 
     if INIT_SILENT:
@@ -210,7 +226,9 @@ def main() -> None:
         if DEBUG_ENABLED:
             send_telegram(
                 "DEBUG (INIT_SILENT)\n"
-                f"variant={variant}\nraw_total={raw_total}\nfiltre_sonrasi={len(items)}\nsetlenen={len(items)}\n"
+                f"first_page_counts={counts}\n"
+                f"chosen_variant={variant}\n"
+                f"raw_total={raw_total}\nfiltre_sonrasi={len(items)}\nsetlenen={len(items)}\n"
                 f"q='{ILAN_SEARCH_TEXT}' target='{TARGET_CITY_TEXT}' pages={ILAN_MAX_PAGES} size={ILAN_PAGE_SIZE}"
             )
         return
@@ -218,7 +236,9 @@ def main() -> None:
     if DEBUG_ENABLED:
         send_telegram(
             "DEBUG\n"
-            f"variant={variant}\nraw_total={raw_total}\nfiltre_sonrasi={len(items)}\nyeni={len(new_items)}\n"
+            f"first_page_counts={counts}\n"
+            f"chosen_variant={variant}\n"
+            f"raw_total={raw_total}\nfiltre_sonrasi={len(items)}\nyeni={len(new_items)}\n"
             f"q='{ILAN_SEARCH_TEXT}' target='{TARGET_CITY_TEXT}' pages={ILAN_MAX_PAGES} size={ILAN_PAGE_SIZE}"
         )
 
