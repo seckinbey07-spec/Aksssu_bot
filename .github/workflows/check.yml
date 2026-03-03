@@ -26,7 +26,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests urllib3
+          pip install requests beautifulsoup4
 
       - name: Run bot
         env:
@@ -35,20 +35,17 @@ jobs:
 
           DEBUG: "1"
           INIT_SILENT: "0"
+          HEARTBEAT: "0"
 
-          ILAN_ENABLED: "1"
-          ILAN_SEARCH_TEXT: "kiralama"
+          # Aksu
+          AKSU_ENABLED: "1"
+          AKSU_URL: "https://www.aksu.bel.tr/ihaleler"
 
-          # Antalya
-          ILAN_CITY_PLATE: "7"
-          ILAN_CITY_TEXT: "antalya"
+          # ilan.gov kapalı (engel + şehir verisi yok)
+          ILAN_ENABLED: "0"
 
-          # Tarama
-          ILAN_PAGE_SIZE: "30"
-          ILAN_MAX_PAGES: "10"
-
-          # Önce Antalya'yı yakalayalım (sonra tekrar 1 yapacağız)
-          REQUIRE_IHALE_IN_URL: "0"
+          # EKAP şimdilik kapalı
+          EKAP_ENABLED: "0"
         run: |
           python bot.py
 
