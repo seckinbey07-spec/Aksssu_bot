@@ -47,8 +47,8 @@ jobs:
           ILAN_PAGE_SIZE: "30"
           ILAN_MAX_PAGES: "10"
 
-          # URL'de "ihale" şartı (çok alakasızı keser)
-          REQUIRE_IHALE_IN_URL: "1"
+          # Önce Antalya'yı yakalayalım (sonra tekrar 1 yapacağız)
+          REQUIRE_IHALE_IN_URL: "0"
         run: |
           python bot.py
 
