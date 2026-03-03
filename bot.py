@@ -2,6 +2,10 @@ import os
 import json
 import time
 import requests
+import urllib3
+
+# SSL uyarılarını kapat
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================
 # Telegram
@@ -25,9 +29,8 @@ ILAN_ENDPOINT = f"{ILAN_BASE_URL}/api/api/services/app/Ad/AdsByFilter"
 ILAN_SEARCH_TEXT = os.getenv("ILAN_SEARCH_TEXT", "kiralama").strip()
 ILAN_CITY_PLATE = int(os.getenv("ILAN_CITY_PLATE", "7"))  # Antalya=7
 ILAN_PAGE_SIZE = int(os.getenv("ILAN_PAGE_SIZE", "30"))
-ILAN_MAX_PAGES = int(os.getenv("ILAN_MAX_PAGES", "10"))  # 10*30=300 ilan tarar
+ILAN_MAX_PAGES = int(os.getenv("ILAN_MAX_PAGES", "10"))
 
-# Alakasızları elemek için
 EXCLUDE_WORDS = [
     "iflas",
     "konkordato",
@@ -36,23 +39,15 @@ EXCLUDE_WORDS = [
     "mahkeme",
     "icra",
     "mühlet",
-    "kordato",
 ]
 
-# urlStr'de ihale sinyali (en iyi pratik filtre)
 REQUIRE_IHALE_IN_URL = os.getenv("REQUIRE_IHALE_IN_URL", "1") == "1"
 
 
 def send_telegram(text: str) -> None:
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN eksik.")
-    if not CHAT_ID_LIST:
-        raise RuntimeError("CHAT_IDS eksik. Örn: 8714272187 veya -100(grup_id)")
-
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     for chat_id in CHAT_ID_LIST:
-        r = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=30)
-        r.raise_for_status()
+        requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=30)
 
 
 def load_state() -> dict:
@@ -74,7 +69,6 @@ def ilan_fetch_page(skip_count: int) -> list[dict]:
         "accept": "text/plain",
     }
 
-    # ilan.gov UI: ?aci=7 (plaka). API tarafında da keys içine aci gönderiyoruz.
     payload = {
         "keys": {
             "q": [ILAN_SEARCH_TEXT] if ILAN_SEARCH_TEXT else [],
@@ -84,30 +78,32 @@ def ilan_fetch_page(skip_count: int) -> list[dict]:
         "maxResultCount": ILAN_PAGE_SIZE,
     }
 
-    r = requests.post(ILAN_ENDPOINT, json=payload, headers=headers, timeout=45)
-    r.raise_for_status()
+    r = requests.post(
+        ILAN_ENDPOINT,
+        json=payload,
+        headers=headers,
+        timeout=45,
+        verify=False,   # 🔥 SSL FIX
+    )
 
     data = r.json()
     ads = (data.get("result") or {}).get("ads") or []
 
     out = []
     for ad in ads:
-        ad_id = str(ad.get("id"))
-        title = (ad.get("title") or "").strip()
-        url_str = (ad.get("urlStr") or "").strip()
         out.append(
             {
-                "id": ad_id,
-                "title": title,
-                "url_str": url_str,
-                "url": ILAN_BASE_URL + url_str if url_str else ILAN_BASE_URL,
+                "id": str(ad.get("id")),
+                "title": (ad.get("title") or "").strip(),
+                "url_str": (ad.get("urlStr") or "").strip(),
+                "url": ILAN_BASE_URL + (ad.get("urlStr") or ""),
             }
         )
     return out
 
 
-def ilan_collect() -> tuple[list[dict], int]:
-    all_items: list[dict] = []
+def ilan_collect():
+    all_items = []
     raw_total = 0
 
     for page_idx in range(ILAN_MAX_PAGES):
@@ -119,31 +115,25 @@ def ilan_collect() -> tuple[list[dict], int]:
         if not items:
             break
 
-        time.sleep(0.35)
+        time.sleep(0.3)
 
     filtered = []
+
     for it in all_items:
-        t = (it.get("title") or "").lower()
-        u = (it.get("url_str") or "").lower()
+        t = it["title"].lower()
+        u = it["url_str"].lower()
 
-        if not it.get("id"):
-            continue
-
-        # kiralama kelimesi mutlaka başlıkta olsun
         if "kiralama" not in t:
             continue
 
-        # ihale sinyali: urlStr içinde ihale
         if REQUIRE_IHALE_IN_URL and "ihale" not in u:
             continue
 
-        # alakasız kelimeleri ele
-        if any(w in t for w in EXCLUDE_WORDS) or any(w in u for w in EXCLUDE_WORDS):
+        if any(w in t for w in EXCLUDE_WORDS):
             continue
 
         filtered.append(it)
 
-    # id bazlı tekilleştir
     uniq = {}
     for it in filtered:
         uniq[it["id"]] = it
@@ -151,10 +141,8 @@ def ilan_collect() -> tuple[list[dict], int]:
     return list(uniq.values()), raw_total
 
 
-def main() -> None:
+def main():
     if not ILAN_ENABLED:
-        if DEBUG_ENABLED:
-            send_telegram("DEBUG: ILAN_ENABLED=0 (kapalı)")
         return
 
     state = load_state()
@@ -163,32 +151,26 @@ def main() -> None:
     items, raw_total = ilan_collect()
     new_items = [x for x in items if x["id"] not in seen]
 
+    if DEBUG_ENABLED:
+        send_telegram(
+            f"DEBUG\nraw_total={raw_total}\nfiltre_sonrasi={len(items)}\nyeni={len(new_items)}"
+        )
+
     if INIT_SILENT:
         for x in items:
             seen.add(x["id"])
-        state["ilan_seen_ids"] = list(seen)[:5000]
+        state["ilan_seen_ids"] = list(seen)
         save_state(state)
-        if DEBUG_ENABLED:
-            send_telegram(
-                "DEBUG (INIT_SILENT)\n"
-                f"raw_total={raw_total}\nfiltre_sonrasi={len(items)}\nsetlenen={len(items)}\n"
-                f"aci={ILAN_CITY_PLATE} q='{ILAN_SEARCH_TEXT}' pages={ILAN_MAX_PAGES} size={ILAN_PAGE_SIZE}"
-            )
         return
 
-    if DEBUG_ENABLED:
-        send_telegram(
-            "DEBUG\n"
-            f"raw_total={raw_total}\nfiltre_sonrasi={len(items)}\nyeni={len(new_items)}\n"
-            f"aci={ILAN_CITY_PLATE} q='{ILAN_SEARCH_TEXT}' pages={ILAN_MAX_PAGES} size={ILAN_PAGE_SIZE}"
-        )
-
     for it in new_items:
-        send_telegram(f"🆕 Antalya kiralama ihalesi (ilan.gov.tr):\n{it['title']}\n{it['url']}")
+        send_telegram(
+            f"🆕 Antalya kiralama ihalesi:\n{it['title']}\n{it['url']}"
+        )
         seen.add(it["id"])
         time.sleep(1)
 
-    state["ilan_seen_ids"] = list(seen)[:5000]
+    state["ilan_seen_ids"] = list(seen)
     save_state(state)
 
 
