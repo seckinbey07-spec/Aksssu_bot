@@ -26,7 +26,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests
+          pip install requests urllib3
 
       - name: Run bot
         env:
@@ -38,9 +38,16 @@ jobs:
 
           ILAN_ENABLED: "1"
           ILAN_SEARCH_TEXT: "kiralama"
+
+          # Antalya
           ILAN_CITY_PLATE: "7"
+          ILAN_CITY_TEXT: "antalya"
+
+          # Tarama
           ILAN_PAGE_SIZE: "30"
           ILAN_MAX_PAGES: "10"
+
+          # URL'de "ihale" şartı (çok alakasızı keser)
           REQUIRE_IHALE_IN_URL: "1"
         run: |
           python bot.py
