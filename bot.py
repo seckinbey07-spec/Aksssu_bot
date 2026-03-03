@@ -24,8 +24,7 @@ def send_telegram(text: str) -> None:
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN eksik.")
     if not CHAT_ID_LIST:
-        raise RuntimeError("CHAT_IDS eksik. Örn: 8714272187 veya -100(grup_id)")
-
+        raise RuntimeError("CHAT_IDS eksik.")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     for chat_id in CHAT_ID_LIST:
         r = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=30)
@@ -55,7 +54,20 @@ AKSU_ENABLED = os.getenv("AKSU_ENABLED", "1") == "1"
 AKSU_URL = os.getenv("AKSU_URL", "https://www.aksu.bel.tr/ihaleler")
 
 
-def aksu_fetch_items(limit: int = 80) -> list[dict]:
+def aksu_is_candidate(title_l: str, href_l: str) -> bool:
+    """
+    Aksu sayfasında ihale linklerini kaçırmamak için toleranslı filtre:
+    - title'da ihale/tender benzeri
+    - veya href içinde ihale/ihaleler
+    """
+    if "ihale" in title_l or "tender" in title_l:
+        return True
+    if "/ihale" in href_l or "ihal" in href_l:
+        return True
+    return False
+
+
+def aksu_fetch_items(limit: int = 120) -> list[dict]:
     r = http_get(AKSU_URL)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
@@ -63,55 +75,54 @@ def aksu_fetch_items(limit: int = 80) -> list[dict]:
     items = []
     seen = set()
 
-    for a in soup.select("a"):
-        title = " ".join(a.get_text(" ", strip=True).split())
+    for a in soup.find_all("a"):
         href = (a.get("href") or "").strip()
-        if not title or not href:
-            continue
-        if len(title) < 8:
+        if not href:
             continue
 
-        # "ihale" geçenleri al
-        if "ihale" not in title.lower():
+        title = " ".join(a.get_text(" ", strip=True).split())
+        title_l = title.lower()
+        href_l = href.lower()
+
+        if not aksu_is_candidate(title_l, href_l):
             continue
 
         full_url = urljoin(AKSU_URL, href)
-        key = (title, full_url)
+
+        # başlık boşsa URL'den üret
+        if not title:
+            title = full_url
+
+        key = full_url
         if key in seen:
             continue
         seen.add(key)
 
         items.append({"title": title, "url": full_url})
+
         if len(items) >= limit:
             break
 
     return items
 
 
-def aksu_check_new(state: dict) -> tuple[list[dict], dict, int]:
+def aksu_check_new(state: dict) -> tuple[list[dict], dict, int, list[dict]]:
     seen_urls = set(state.get("aksu_seen_urls", []))
-    items = aksu_fetch_items(limit=80)
+
+    items = aksu_fetch_items(limit=120)
     new_items = [it for it in items if it["url"] not in seen_urls]
 
     for it in items:
         seen_urls.add(it["url"])
-    state["aksu_seen_urls"] = list(seen_urls)[:500]
+    state["aksu_seen_urls"] = list(seen_urls)[:800]
 
-    return new_items, state, len(items)
-
-
-# =========================
-# ilan.gov.tr (KAPALI)
-# =========================
-ILAN_ENABLED = os.getenv("ILAN_ENABLED", "0") == "1"
+    sample = items[:5]
+    return new_items, state, len(items), sample
 
 
 # =========================
-# EKAP (şimdilik kapalı)
+# Main
 # =========================
-EKAP_ENABLED = os.getenv("EKAP_ENABLED", "0") == "1"
-
-
 def main() -> None:
     if HEARTBEAT_ENABLED:
         send_telegram("HEARTBEAT: Bot tetiklendi.")
@@ -120,22 +131,30 @@ def main() -> None:
 
     aksu_new = []
     aksu_total = 0
+    aksu_sample = []
 
     if AKSU_ENABLED:
-        aksu_new, state, aksu_total = aksu_check_new(state)
+        aksu_new, state, aksu_total, aksu_sample = aksu_check_new(state)
 
-    # INIT_SILENT: ilk kurulumda eski ilanları yeni sayma
     if INIT_SILENT:
         save_state(state)
         if DEBUG_ENABLED:
-            send_telegram(f"DEBUG (INIT_SILENT)\nAksu toplam={aksu_total}, yeni={len(aksu_new)}")
+            send_telegram(
+                "DEBUG (INIT_SILENT)\n"
+                f"Aksu toplam={aksu_total}, yeni={len(aksu_new)}\n"
+                f"Örnekler:\n" + "\n".join([f"- {x['title']} | {x['url']}" for x in aksu_sample])
+            )
         return
 
     if DEBUG_ENABLED:
-        send_telegram(f"DEBUG\nAksu toplam={aksu_total}, yeni={len(aksu_new)}\nilan.gov=KAPALI\nEKAP={'ACIK' if EKAP_ENABLED else 'KAPALI'}")
+        send_telegram(
+            "DEBUG\n"
+            f"Aksu toplam={aksu_total}, yeni={len(aksu_new)}\n"
+            f"Örnekler:\n" + "\n".join([f"- {x['title']} | {x['url']}" for x in aksu_sample])
+        )
 
     for it in aksu_new:
-        send_telegram(f"🆕 Aksu Belediyesi ihale:\n{it['title']}\n{it['url']}")
+        send_telegram(f"🆕 Aksu link:\n{it['title']}\n{it['url']}")
         time.sleep(1)
 
     save_state(state)
